@@ -1,0 +1,21 @@
+{
+  "summary": "Direct v1：生成 1 个用例，通过 1、失败 0",
+  "metrics": {
+    "strategy_version_id": "sv-direct-v1",
+    "workflow_type": "direct",
+    "tool_call_count": 3,
+    "total_tokens": 180,
+    "plan_items": 1,
+    "attempts": 1,
+    "reflection_used": false,
+    "reflection_contract_violation": false,
+    "suspected_code_bug": false,
+    "collected": 1,
+    "collection_errors": 0,
+    "final_cases_total": 1,
+    "final_passed": 1,
+    "final_failed": 0,
+    "final_skipped": 0
+  },
+  "risk_notes": "无显著风险。"
+}
