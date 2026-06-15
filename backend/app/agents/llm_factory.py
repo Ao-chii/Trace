@@ -44,6 +44,7 @@ def create_llm(
     provider: Optional[str],
     model: Optional[str] = None,
     *,
+    api_key: Optional[str] = None,
     temperature: Optional[float] = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     base_url: Optional[str] = None,
@@ -54,6 +55,7 @@ def create_llm(
     if normalized == "openai":
         return OpenAILLM(
             model,
+            api_key=api_key,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             base_url=base_url,
@@ -64,6 +66,7 @@ def create_llm(
         raise ValueError("openai_chat_compat 不支持 reasoning_effort；不同兼容端点字段差异太大")
     return OpenAIChatCompatLLM(
         model,
+        api_key=api_key,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         base_url=base_url,

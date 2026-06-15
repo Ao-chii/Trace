@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.agents.llm import MockLLM
+from app.agents.llm_config import load_llm_config
+from app.agents.llm_factory import create_llm
 from app.agents.orchestrator import execute_run, freeze_runtime_snapshot, freeze_strategy_snapshot
 from app.agents.runtime import PlanInput
 from app.core.errors import ErrorCode
@@ -54,6 +56,45 @@ def _strategy_spec_from_model(model: StrategyVersion) -> StrategyVersionSpec:
         max_tool_calls=model.max_tool_calls,
         prompt_ref=model.prompt_ref,
         tool_schema_ref=model.tool_schema_ref,
+    )
+
+
+def _effective_strategy_spec(model: StrategyVersion) -> StrategyVersionSpec:
+    # V1 seeded strategy_versions 默认记录为 mock。运行时统一读取 backend/llm.config.json，
+    # 并把 provider/model 冻结进 run snapshot；只有配置文件显式 provider=mock 才使用 MockLLM。
+    spec = _strategy_spec_from_model(model)
+    config = load_llm_config()
+    if config is None:
+        raise ValueError("缺少 backend/llm.config.json；后端默认使用真实 LLM，请先创建配置文件")
+    return spec.model_copy(
+        update={
+            "model_provider": config.provider,
+            "model_name": config.model,
+            "model_params": {
+                **dict(spec.model_params or {}),
+                "base_url": config.base_url,
+                "temperature": config.temperature,
+                "max_output_tokens": config.max_output_tokens,
+                "reasoning_effort": config.reasoning_effort,
+            },
+        }
+    )
+
+
+def _llm_for_strategy(strategy_spec: StrategyVersionSpec):
+    provider = strategy_spec.model_provider
+    if provider == "mock":
+        return _mock_llm()
+    config = load_llm_config()
+    params = dict(strategy_spec.model_params or {})
+    return create_llm(
+        provider,
+        strategy_spec.model_name,
+        api_key=(config.api_key if config else None),
+        temperature=params.get("temperature"),
+        max_output_tokens=int(params.get("max_output_tokens", 8192)),
+        base_url=params.get("base_url"),
+        reasoning_effort=params.get("reasoning_effort"),
     )
 
 
@@ -129,7 +170,7 @@ def create_run(
     strategy = get_strategy_version(session, strategy_id)
     if strategy is None:
         raise ValueError("strategy not found")
-    strategy_spec = _strategy_spec_from_model(strategy)
+    strategy_spec = _effective_strategy_spec(strategy)
 
     run = TestRun(
         id=new_id(),
@@ -220,7 +261,7 @@ def execute_run_sync(
         root = validate_snapshot_root(snapshot.root_path, project_root=project.local_path)
         test_write_dir = ensure_generated_tests_dir(root)
         recorder = SQLAlchemyRunRecorder(session)
-        strategy_spec = _strategy_spec_from_model(strategy)
+        strategy_spec = _effective_strategy_spec(strategy)
         budget = dict(plan.budget or {})
         stored_override = dict((run.runtime_snapshot or {}).get("budget_override") or {})
         if stored_override:
@@ -228,23 +269,28 @@ def execute_run_sync(
         if budget_override:
             # 本次 run 允许对计划默认预算做局部覆盖，如更短超时或关闭 reflection。
             budget.update(budget_override)
-        llm = _mock_llm()
+        llm = _llm_for_strategy(strategy_spec)
 
-        execute_run(
-            tools=ToolContext(root=root, test_write_dir=test_write_dir),
-            registry=default_registry(),
-            llm=llm,
-            recorder=recorder,
-            strategy_spec=strategy_spec,
-            plan_input=PlanInput(
-                target_scope=list(plan.target_scope or []),
-                goal=plan.goal,
-                allow_reflection=bool(budget.get("allow_reflection", False)),
-                timeout_seconds=int(budget.get("timeout_seconds", 120)),
-            ),
-            run=_run_record_from_model(run),
-            artifacts_dir=_artifacts_dir(root, run.id),
-        )
+        try:
+            execute_run(
+                tools=ToolContext(root=root, test_write_dir=test_write_dir),
+                registry=default_registry(),
+                llm=llm,
+                recorder=recorder,
+                strategy_spec=strategy_spec,
+                plan_input=PlanInput(
+                    target_scope=list(plan.target_scope or []),
+                    goal=plan.goal,
+                    allow_reflection=bool(budget.get("allow_reflection", False)),
+                    timeout_seconds=int(budget.get("timeout_seconds", 120)),
+                ),
+                run=_run_record_from_model(run),
+                artifacts_dir=_artifacts_dir(root, run.id),
+            )
+        finally:
+            close = getattr(llm, "close", None)
+            if callable(close):
+                close()
     except Exception as exc:
         _mark_run_failed(session, run.id, f"{type(exc).__name__}: {exc}")
         raise
