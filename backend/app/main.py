@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 
 from app.api import api_router
+from app.agents.llm_config import load_llm_config
 from app.db.session import get_engine
 from app.models import load_all_models
 from app.services.strategies import seed_strategy_versions
@@ -20,7 +21,11 @@ def create_app(*, initialize: bool = True) -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
-        return {"ok": True}
+        llm = load_llm_config()
+        return {
+            "ok": True,
+            "llm": None if llm is None else {"provider": llm.provider, "model": llm.model, "base_url": llm.base_url},
+        }
 
     return app
 

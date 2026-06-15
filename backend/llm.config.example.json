@@ -1,0 +1,9 @@
+{
+  "provider": "openai_chat_compat",
+  "base_url": "https://api.myy9.com/v1",
+  "model": "gpt-5.4",
+  "api_key": "sk-REPLACE_ME",
+  "temperature": 0,
+  "max_output_tokens": 8192
+}
+

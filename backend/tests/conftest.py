@@ -1,5 +1,6 @@
 import sys
 import time
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 
 _BACKEND = Path(__file__).resolve().parent.parent
 _TRACE_ROOT = _BACKEND.parent
+os.environ.setdefault("TRACE_LLM_CONFIG_FILE", str(_BACKEND / "tests" / "fixtures" / "llm.mock.config.json"))
 for p in (str(_BACKEND), str(_TRACE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)

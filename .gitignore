@@ -58,8 +58,12 @@ node_modules/
 .env.local
 .env.*
 !.env.example
+backend/llm.config.json
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+demo-project/
+haha.md
