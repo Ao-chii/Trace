@@ -118,6 +118,58 @@ def test_analyze_project_symbol_scope_scans_project_then_source_context_resolves
     assert bundle.snippets[0].path == "shop/pricing.py"
 
 
+def test_analyze_project_extracts_pytest_fixtures_from_conftest(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def client(app):\n"
+        "    return app.test_client()\n",
+        encoding="utf-8",
+    )
+
+    analysis = analyze_project(_ctx(tmp_path), AnalyzeProjectInput(target_scope=["."]))
+
+    assert len(analysis.fixtures) == 1
+    fixture = analysis.fixtures[0]
+    assert fixture.name == "client"
+    assert fixture.file == "tests/conftest.py"
+    assert fixture.dependencies == ["app"]
+
+
+def test_source_context_includes_fixture_and_existing_test_evidence(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "shop" / "pricing.py").write_text(_SAMPLE, encoding="utf-8")
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def client():\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_pricing.py").write_text(
+        "from shop.pricing import target_fn\n"
+        "\n"
+        "def test_existing_pricing_case(client):\n"
+        "    assert target_fn(2, 3) == 7\n",
+        encoding="utf-8",
+    )
+    analysis = analyze_project(_ctx(tmp_path), AnalyzeProjectInput(target_scope=["target_fn"]))
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["target_fn"], analysis)
+
+    assert bundle.context_completeness.status == "complete"
+    refs = {snippet.target_ref for snippet in bundle.snippets}
+    assert "target_fn" in refs
+    assert "fixture:client" in refs
+    assert "existing_test:tests/test_pricing.py::test_existing_pricing_case" in refs
+    assert "def client" in bundle.source_context_text
+    assert "def test_existing_pricing_case" in bundle.source_context_text
+
+
 def test_path_traversal_target_is_denied(tmp_path):
     # 项目根外放一个“机密”文件，目标越界读它必须失败并标缺失，不能泄漏。
     (tmp_path.parent / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")

@@ -34,6 +34,7 @@ def build_source_context_bundle(
     max_file_bytes: int = 24000,
     max_total_bytes: int = 48000,
     max_snippets: int = 12,
+    max_support_snippets: int = 4,
 ) -> SourceContextBundle:
     """按目标函数/路由读取源码片段。
 
@@ -97,7 +98,23 @@ def build_source_context_bundle(
         header = f"## {out.path}:{start_line}-{end_line} ({target_ref})"
         pieces.append(f"{header}\n```python\n{segment}\n```")
 
-    if not snippets:
+    target_snippet_count = len(snippets)
+
+    if analysis is not None and max_support_snippets > 0:
+        total_bytes = _append_support_context(
+            ctx,
+            analysis,
+            snippets,
+            pieces,
+            seen,
+            total_bytes,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+            max_support_snippets=max_support_snippets,
+            risk_notes=risk_notes,
+        )
+
+    if target_snippet_count == 0:
         status = "incomplete"
         risk_notes.append("no source snippet could be read")
     elif missing_targets:
@@ -208,3 +225,83 @@ def _slice_symbol(content: str, symbol: str) -> tuple[int, int, str] | None:
             segment = "\n".join(lines[start - 1 : end])
             return start, end, segment
     return None
+
+
+def _append_support_context(
+    ctx: ToolContext,
+    analysis: AnalyzeProjectOutput,
+    snippets: list[SourceContextSnippet],
+    pieces: list[str],
+    seen: set[tuple[str, str | None]],
+    total_bytes: int,
+    *,
+    max_file_bytes: int,
+    max_total_bytes: int,
+    max_support_snippets: int,
+    risk_notes: list[str],
+) -> int:
+    support = _support_targets(ctx, analysis)
+    if len(support) > max_support_snippets:
+        risk_notes.append("support context truncated by max_support_snippets")
+    for target in support[:max_support_snippets]:
+        key = (target.rel_path, target.raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            out = read_file(ctx, ReadFileInput(path=target.rel_path, max_bytes=max_file_bytes))
+        except Exception:
+            risk_notes.append(f"support context unavailable: {target.raw}")
+            continue
+        if not target.symbol:
+            continue
+        sliced = _slice_symbol(out.content, target.symbol)
+        if sliced is None:
+            risk_notes.append(f"support context symbol unavailable: {target.raw}")
+            continue
+        start_line, end_line, segment = sliced
+        segment_bytes = len(segment.encode("utf-8"))
+        if total_bytes + segment_bytes > max_total_bytes:
+            risk_notes.append("support context truncated by max_total_bytes")
+            break
+        total_bytes += segment_bytes
+        snippets.append(
+            SourceContextSnippet(
+                path=out.path,
+                target_ref=target.raw,
+                start_line=start_line,
+                end_line=end_line,
+                content_hash=hashlib.sha256(segment.encode("utf-8")).hexdigest(),
+                bytes=segment_bytes,
+            )
+        )
+        header = f"## {out.path}:{start_line}-{end_line} ({target.raw})"
+        pieces.append(f"{header}\n```python\n{segment}\n```")
+    return total_bytes
+
+
+def _support_targets(ctx: ToolContext, analysis: AnalyzeProjectOutput) -> list[_Target]:
+    generated_tests_dir = ctx.relpath(ctx.test_write_dir)
+    targets: list[_Target] = []
+    for fixture in analysis.fixtures:
+        if _is_generated_test_path(fixture.file, generated_tests_dir):
+            continue
+        targets.append(_Target(raw=f"fixture:{fixture.name}", rel_path=fixture.file, symbol=fixture.name))
+    for test_file in analysis.existing_tests:
+        if _is_generated_test_path(test_file.path, generated_tests_dir):
+            continue
+        for test in test_file.test_functions:
+            targets.append(
+                _Target(
+                    raw=f"existing_test:{test.estimated_nodeid}",
+                    rel_path=test_file.path,
+                    symbol=test.name,
+                )
+            )
+    return targets
+
+
+def _is_generated_test_path(path: str, generated_tests_dir: str) -> bool:
+    norm = path.replace("\\", "/").strip("/")
+    generated = generated_tests_dir.replace("\\", "/").strip("/")
+    return bool(generated) and (norm == generated or norm.startswith(generated + "/"))

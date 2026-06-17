@@ -78,6 +78,13 @@ class TestFunctionInfo(BaseModel):
     estimated_nodeid: str
 
 
+class FixtureInfo(BaseModel):
+    name: str
+    file: str
+    line: int
+    dependencies: list[str] = Field(default_factory=list)
+
+
 class ExistingTestInfo(BaseModel):
     path: str
     test_functions: list[TestFunctionInfo] = Field(default_factory=list)
@@ -88,6 +95,7 @@ class AnalyzeProjectOutput(BaseModel):
     routes: list[RouteInfo] = Field(default_factory=list)
     functions: list[FunctionInfo] = Field(default_factory=list)
     models: list[ModelInfo] = Field(default_factory=list)
+    fixtures: list[FixtureInfo] = Field(default_factory=list)
     existing_tests: list[ExistingTestInfo] = Field(default_factory=list)
     dependency_files: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

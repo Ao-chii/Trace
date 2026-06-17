@@ -8,6 +8,7 @@ from app.schemas.tools import (
     AnalyzeProjectOutput,
     ExistingTestInfo,
     FileInfo,
+    FixtureInfo,
     FunctionInfo,
     ModelInfo,
     RouteInfo,
@@ -40,6 +41,7 @@ def analyze_project(ctx: ToolContext, inp: AnalyzeProjectInput) -> AnalyzeProjec
             tinfo = _extract_tests(rel, tree)
             if tinfo.test_functions:
                 out.existing_tests.append(tinfo)
+            out.fixtures.extend(_extract_fixtures(rel, tree))
         else:
             out.files.append(FileInfo(path=rel, kind="source", size=f.stat().st_size))
             _extract_source(rel, tree, out)
@@ -104,7 +106,13 @@ def _collect_py_files(scopes: list[Path]) -> list[Path]:
 
 def _is_test_file(rel: str) -> bool:
     name = rel.rsplit("/", 1)[-1]
-    return rel.startswith("tests/") or "/tests/" in rel or name.startswith("test_") or name.endswith("_test.py")
+    return (
+        rel.startswith("tests/")
+        or "/tests/" in rel
+        or name == "conftest.py"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    )
 
 
 def _signature(node) -> str:
@@ -246,3 +254,31 @@ def _extract_tests(rel: str, tree: ast.AST) -> ExistingTestInfo:
                         )
                     )
     return info
+
+
+def _extract_fixtures(rel: str, tree: ast.AST) -> list[FixtureInfo]:
+    fixtures: list[FixtureInfo] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _is_pytest_fixture(node):
+            continue
+        fixtures.append(
+            FixtureInfo(
+                name=node.name,
+                file=rel,
+                line=node.lineno,
+                dependencies=[arg.arg for arg in node.args.args],
+            )
+        )
+    return fixtures
+
+
+def _is_pytest_fixture(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in node.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Name) and target.id == "fixture":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "fixture":
+            return True
+    return False
