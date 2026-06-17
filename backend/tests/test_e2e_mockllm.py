@@ -162,6 +162,9 @@ def test_direct_pass(tmp_path):
     pb = run.strategy_snapshot["prompts"]
     assert "红线" in pb["reflection_contract"]
     assert pb["plan_instruction"] and pb["generate_schema_hint"] and pb["reflect_json_tail"]
+    assert "PIPELINE_REJECT" in pb["generate_contract"]
+    assert "响应 JSON" in pb["generate_contract"]
+    assert "未知参数" in pb["generate_contract"]
 
 
 def test_generated_class_nodeid_maps_with_class_name(tmp_path):

@@ -324,3 +324,33 @@ def test_generation_contract_accepts_builtin_and_parametrize_arguments():
     )
 
     assert violations == []
+
+
+def test_generation_contract_accepts_parametrized_case_metadata_names():
+    content = (
+        "import pytest\n"
+        "from shop.pricing import apply_discount\n"
+        "@pytest.mark.parametrize('total,is_member,expected', [(100, True, 90.0), (50, False, 50.0)])\n"
+        "def test_apply_discount(total, is_member, expected):\n"
+        "    assert apply_discount(total, is_member) == expected\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_apply_discount[100-True-90.0]",
+                "target_function": "apply_discount",
+                "assertion_summary": "会员满 100 打折",
+            },
+            {
+                "test_name": "test_apply_discount[50-False-50.0]",
+                "target_function": "apply_discount",
+                "assertion_summary": "非会员不打折",
+            },
+        ],
+        target_type="function",
+        target_ref="apply_discount",
+        allowed_fixtures=[],
+    )
+
+    assert violations == []

@@ -80,7 +80,9 @@ def check_generation_contract(
         return [f"生成测试无法解析为 Python：{e}"]
 
     parsed_names = set(_test_names(tree))
-    declared_by_name = {_field(case, "test_name"): case for case in declared_cases if _field(case, "test_name")}
+    declared_by_name = {
+        _base_test_name(_field(case, "test_name")): case for case in declared_cases if _field(case, "test_name")
+    }
 
     if _has_skip_or_xfail(tree):
         violations.append("生成测试引入 pytest.skip/xfail 跳过测试")
@@ -137,6 +139,10 @@ def _field(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+def _base_test_name(name: Any) -> str:
+    return str(name).split("::")[-1].split("[", 1)[0].strip()
 
 
 def _test_names(tree) -> list[str]:

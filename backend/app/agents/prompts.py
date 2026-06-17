@@ -62,6 +62,13 @@ _GEN_SCHEMA_HINT = (
 
 GEN_PREFIX = "生成一个 pytest 测试文件。"
 
+GEN_CONTRACT = """生成硬约束（违反会被 PIPELINE_REJECT）：
+- 每个检查必须写成 assert 或 pytest.raises；不要写裸表达式，例如 response.json()["total"] == 270.0。
+- 成功路由测试不能只断言 2xx status_code，必须断言响应 JSON 的业务字段和值。
+- 不要给测试函数添加未知参数；只能使用 pytest 内置 fixture（如 monkeypatch/tmp_path）或项目分析中列出的 fixture。
+- 使用 unittest.mock.patch(..., new_value) 时不要额外声明 mock 参数；可优先使用 pytest 内置 monkeypatch。
+- cases[*].test_name 必须对应真实 test 函数名；参数化测试可使用 test_x[...]。"""
+
 PLAN_INSTRUCTION = (
     '把目标拆成若干测试任务，返回 JSON：'
     '{"items":[{"index":0,"target_type":"function|route|module","target_ref":"标识","goal":"该任务测什么","planned_assertions":["..."]}]}'
@@ -83,6 +90,7 @@ def prompt_bundle(strategy: StrategyVersionSpec) -> dict:
         "reflection_contract": REFLECTION_CONTRACT_V1,
         "plan_instruction": PLAN_INSTRUCTION,
         "generate_prefix": GEN_PREFIX,
+        "generate_contract": GEN_CONTRACT,
         "generate_schema_hint": _GEN_SCHEMA_HINT,
         "reflect_json_tail": REFLECT_JSON_TAIL,
     }
@@ -113,6 +121,7 @@ def build_generate_messages(
         f"TASK: GENERATE\n总目标：{goal}\n范围：{scope or '整个项目'}{focus}\n\n"
         f"项目分析：\n{summarize_analysis(analysis)}\n\n"
         f"{source_block}\n"
+        f"{GEN_CONTRACT}\n"
         f"{GEN_PREFIX}{_GEN_SCHEMA_HINT}"
     )
     return [Message("system", build_system_prompt(strategy)), Message("user", user)]

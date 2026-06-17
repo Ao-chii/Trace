@@ -12,13 +12,13 @@
       "capture_rate_mean": 1.0,
       "capture_rate_std": 0.0,
       "false_positive_rate": 0.0,
-      "avg_tokens": 4140,
+      "avg_tokens": 4029,
       "avg_tool_calls": 3,
       "reflection_used": false,
       "invalid_test_set_count": 0,
       "metric_status": "ok",
-      "cost_per_captured_bug": 690.0,
-      "avg_duration_ms": 16722.0,
+      "cost_per_captured_bug": 671.5,
+      "avg_duration_ms": 10078.0,
       "pytest_collection_success_rate": 1.0,
       "reflection_contract_pass_rate": null,
       "reflection_acceptance_rate": null,
@@ -28,7 +28,7 @@
         "provider": "openai_chat_compat",
         "model": "deepseek-v4-flash",
         "derived_from_clean_run_ids": [
-          "153f1980-6b44-4772-bfef-6b34b4705df5"
+          "7bf94333-2731-4188-9695-c368fe567939"
         ],
         "source": "derived_from_clean_run_strategy_snapshots"
       }
@@ -36,30 +36,32 @@
     {
       "strategy_id": "plan_execute",
       "strategy_name": "Plan-and-Execute v1",
-      "repeats": 0,
-      "captured_per_repeat": [],
-      "captured_mean": 0.0,
+      "repeats": 1,
+      "captured_per_repeat": [
+        6
+      ],
+      "captured_mean": 6,
       "total_in_scope": 6,
-      "capture_rate_mean": 0.0,
+      "capture_rate_mean": 1.0,
       "capture_rate_std": 0.0,
-      "false_positive_rate": 0.0,
-      "avg_tokens": 0.0,
-      "avg_tool_calls": 0.0,
+      "false_positive_rate": 1.0,
+      "avg_tokens": 18153,
+      "avg_tool_calls": 15,
       "reflection_used": false,
-      "invalid_test_set_count": 1,
-      "metric_status": "invalid_test_set",
-      "cost_per_captured_bug": null,
-      "avg_duration_ms": 0.0,
-      "pytest_collection_success_rate": 0.0,
+      "invalid_test_set_count": 0,
+      "metric_status": "ok",
+      "cost_per_captured_bug": 3025.5,
+      "avg_duration_ms": 11443.0,
+      "pytest_collection_success_rate": 1.0,
       "reflection_contract_pass_rate": null,
       "reflection_acceptance_rate": null,
-      "cost_per_captured_bug_status": "no_bug_captured",
+      "cost_per_captured_bug_status": "ok",
       "data_source": "real_llm",
       "llm_display": {
         "provider": "openai_chat_compat",
         "model": "deepseek-v4-flash",
         "derived_from_clean_run_ids": [
-          "1e75ee95-58be-4d00-8cc5-3321fed78080"
+          "2ce76f68-6d51-4783-abb0-64a16dea96a0"
         ],
         "source": "derived_from_clean_run_strategy_snapshots"
       }
@@ -76,13 +78,13 @@
       "capture_rate_mean": 1.0,
       "capture_rate_std": 0.0,
       "false_positive_rate": 0.0,
-      "avg_tokens": 4991,
+      "avg_tokens": 4707,
       "avg_tool_calls": 3,
       "reflection_used": false,
       "invalid_test_set_count": 0,
       "metric_status": "ok",
-      "cost_per_captured_bug": 831.8333333333334,
-      "avg_duration_ms": 17896.0,
+      "cost_per_captured_bug": 784.5,
+      "avg_duration_ms": 10545.0,
       "pytest_collection_success_rate": 1.0,
       "reflection_contract_pass_rate": null,
       "reflection_acceptance_rate": null,
@@ -92,7 +94,7 @@
         "provider": "openai_chat_compat",
         "model": "deepseek-v4-flash",
         "derived_from_clean_run_ids": [
-          "2d1fde76-fefa-4160-9153-b4313de101c2"
+          "ef6b6f00-b7cd-426d-a854-d84e0819a116"
         ],
         "source": "derived_from_clean_run_strategy_snapshots"
       }
@@ -101,37 +103,37 @@
   "capture_matrix": {
     "variant-cmp-flip-discount": {
       "direct": true,
-      "plan_execute": false,
-      "react_reflection": true
-    },
-    "variant-boundary-loyalty": {
-      "direct": true,
-      "plan_execute": false,
-      "react_reflection": true
-    },
-    "variant-boundary-shipping": {
-      "direct": true,
-      "plan_execute": false,
+      "plan_execute": true,
       "react_reflection": true
     },
     "variant-cmp-flip-freeship": {
       "direct": true,
-      "plan_execute": false,
+      "plan_execute": true,
+      "react_reflection": true
+    },
+    "variant-boundary-shipping": {
+      "direct": true,
+      "plan_execute": true,
+      "react_reflection": true
+    },
+    "variant-boundary-loyalty": {
+      "direct": true,
+      "plan_execute": true,
       "react_reflection": true
     },
     "variant-missing-clamp": {
       "direct": true,
-      "plan_execute": false,
+      "plan_execute": true,
       "react_reflection": true
     },
     "variant-wrong-status": {
       "direct": true,
-      "plan_execute": false,
+      "plan_execute": true,
       "react_reflection": true
     }
   },
   "experiment": {
-    "id": "exp-7b93cad4-2d84-4b5c-a035-d46800a39758",
+    "id": "exp-ae74f9a4-66e7-4b33-aa81-2761c8c68457",
     "name": "cli-v2-eval",
     "dataset_id": "dataset-demo-v2",
     "strategy_version_ids": [
@@ -151,9 +153,9 @@
       }
     },
     "status": "completed",
-    "created_at": "2026-06-17T16:07:43.800923+08:00",
-    "started_at": "2026-06-17T16:07:43.817180+08:00",
-    "finished_at": "2026-06-17T16:11:11.921429+08:00",
+    "created_at": "2026-06-17T17:23:30.124415+08:00",
+    "started_at": "2026-06-17T17:23:30.134523+08:00",
+    "finished_at": "2026-06-17T17:26:45.579993+08:00",
     "error_code": null,
     "error_message": null
   }
