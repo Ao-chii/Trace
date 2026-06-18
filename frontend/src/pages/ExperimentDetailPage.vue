@@ -139,7 +139,11 @@ watch(
       </section>
 
       <ExperimentMetricsTable :rows="metrics.rows" />
-      <CaptureMatrix :rows="metrics.rows" :capture-matrix="metrics.capture_matrix" />
+      <CaptureMatrix
+        :rows="metrics.rows"
+        :capture-matrix="metrics.capture_matrix"
+        :capture-matrix-counts="metrics.capture_matrix_counts"
+      />
       <CleanRunTable :clean-runs="metrics.clean_runs" @open-run="openCleanRun" />
       <ReplayEvidencePanel
         :replay-runs="metrics.replay_runs"

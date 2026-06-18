@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { ArrowRight, Beaker, Play, RefreshCw, ServerCrash } from "@lucide/vue";
-import { listExperiments, runExperiment } from "../api/experiments";
+import { ArrowRight, Beaker, Play, Plus, RefreshCw, ServerCrash } from "@lucide/vue";
+import { createExperiment, listExperiments, runExperiment } from "../api/experiments";
+import { listEvalDatasets } from "../api/evaluation";
+import { listStrategies, listStrategyVersions } from "../api/strategies";
 import { demoExperimentMetrics } from "../demo/staticRunFixture";
 import { useLatestRequest } from "../composables/useLatestRequest";
 import { useI18n } from "../i18n";
-import type { ExperimentDefinition } from "../types/api";
+import type { EvalDatasetOut, ExperimentDefinition, StrategyVersionOut } from "../types/api";
 import type { DataSource } from "../types/ui";
 
 const props = defineProps<{
@@ -19,13 +21,34 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const experiments = ref<ExperimentDefinition[]>([]);
+const datasets = ref<EvalDatasetOut[]>([]);
+const strategyVersions = ref<StrategyVersionOut[]>([]);
 const loading = ref(false);
+const creating = ref(false);
 const startingId = ref<string | null>(null);
 const errorMessage = ref<string | null>(null);
+const createError = ref<string | null>(null);
+const form = ref({
+  id: "",
+  name: "local demo experiment",
+  datasetId: "",
+  strategyVersionIds: [] as string[],
+  repeatCount: 1,
+  provider: "mock",
+  model: "mock-1"
+});
 
 const listRequest = useLatestRequest();
 
 const completedCount = computed(() => experiments.value.filter((experiment) => experiment.status === "completed").length);
+const canCreate = computed(
+  () =>
+    props.dataSource === "api" &&
+    form.value.name.trim() &&
+    form.value.datasetId &&
+    form.value.strategyVersionIds.length > 0 &&
+    form.value.repeatCount >= 1
+);
 
 // llm_override is only the override layer; the resolved final provider/model is
 // frozen per clean run's strategy_snapshot (see Experiment Detail). On the list we
@@ -72,6 +95,69 @@ async function loadExperiments() {
   }
 }
 
+async function loadCreateOptions() {
+  if (props.dataSource !== "api") {
+    datasets.value = [];
+    strategyVersions.value = [];
+    return;
+  }
+  try {
+    const [nextDatasets, strategies] = await Promise.all([listEvalDatasets(), listStrategies()]);
+    const versionGroups = await Promise.all(strategies.map((strategy) => listStrategyVersions(strategy.id)));
+    datasets.value = nextDatasets;
+    strategyVersions.value = versionGroups.flat();
+    if (!form.value.datasetId && nextDatasets[0]) {
+      form.value.datasetId = nextDatasets[0].id;
+    }
+    if (form.value.strategyVersionIds.length === 0) {
+      form.value.strategyVersionIds = versionGroups.flat().map((version) => version.id);
+    }
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : t("experiments.optionsFailed");
+  }
+}
+
+function toggleStrategy(versionId: string) {
+  const current = new Set(form.value.strategyVersionIds);
+  if (current.has(versionId)) {
+    current.delete(versionId);
+  } else {
+    current.add(versionId);
+  }
+  form.value.strategyVersionIds = [...current];
+}
+
+async function submitExperiment() {
+  if (!canCreate.value) {
+    return;
+  }
+  creating.value = true;
+  createError.value = null;
+  try {
+    const override =
+      form.value.provider.trim() || form.value.model.trim()
+        ? {
+            provider: form.value.provider.trim() || null,
+            model: form.value.model.trim() || null
+          }
+        : null;
+    const created = await createExperiment({
+      id: form.value.id.trim() || null,
+      name: form.value.name.trim(),
+      dataset_id: form.value.datasetId,
+      strategy_version_ids: form.value.strategyVersionIds,
+      repeat_count: Number(form.value.repeatCount) || 1,
+      llm_override: override
+    });
+    experiments.value = [created, ...experiments.value.filter((item) => item.id !== created.id)];
+    openExperiment(created.id);
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : t("experiments.createFailed");
+  } finally {
+    creating.value = false;
+  }
+}
+
 async function startExperiment(experiment: ExperimentDefinition) {
   if (props.dataSource !== "api") {
     openExperiment(experiment.id);
@@ -91,12 +177,14 @@ async function startExperiment(experiment: ExperimentDefinition) {
 
 onMounted(() => {
   void loadExperiments();
+  void loadCreateOptions();
 });
 
 watch(
   () => props.dataSource,
   () => {
     void loadExperiments();
+    void loadCreateOptions();
   }
 );
 </script>
@@ -110,6 +198,10 @@ watch(
         <p>{{ t("experiments.subtitle") }}</p>
       </div>
       <div class="head-actions">
+        <button v-if="props.dataSource === 'api'" class="text-button" type="button" @click="emit('navigate', '#/datasets/new')">
+          <Plus :size="16" aria-hidden="true" />
+          {{ t("datasets.create") }}
+        </button>
         <button class="text-button" type="button" @click="loadExperiments">
           <RefreshCw :size="16" aria-hidden="true" />
           {{ t("projects.refresh") }}
@@ -118,6 +210,7 @@ watch(
     </section>
 
     <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
+    <p v-if="createError" class="error-banner">{{ createError }}</p>
 
     <section class="summary-strip">
       <article class="subtle-panel summary-tile">
@@ -132,6 +225,64 @@ watch(
         <span>{{ t("experiments.source") }}</span>
         <strong>{{ props.dataSource === "demo" ? t("app.demo") : t("app.api") }}</strong>
       </article>
+    </section>
+
+    <section v-if="props.dataSource === 'api'" class="subtle-panel create-panel">
+      <div class="panel-title">
+        <div>
+          <p class="eyebrow">CREATE EXPERIMENT</p>
+          <h2>{{ t("experiments.createTitle") }}</h2>
+        </div>
+        <button class="text-button" type="button" :disabled="!canCreate || creating" @click="submitExperiment">
+          <Plus :size="16" aria-hidden="true" />
+          {{ creating ? t("experiments.creating") : t("experiments.create") }}
+        </button>
+      </div>
+      <div class="create-grid">
+        <label>
+          <span>{{ t("experiments.optionalId") }}</span>
+          <input v-model="form.id" type="text" placeholder="exp-local-demo" />
+        </label>
+        <label>
+          <span>{{ t("experiments.name") }}</span>
+          <input v-model="form.name" type="text" />
+        </label>
+        <label>
+          <span>{{ t("experiments.dataset") }}</span>
+          <select v-model="form.datasetId">
+            <option v-for="dataset in datasets" :key="dataset.id" :value="dataset.id">
+              {{ dataset.name }} / {{ dataset.version }}
+            </option>
+          </select>
+        </label>
+        <label>
+          <span>{{ t("experiments.repeat") }}</span>
+          <input v-model.number="form.repeatCount" type="number" min="1" max="20" />
+        </label>
+        <label>
+          <span>{{ t("experiments.provider") }}</span>
+          <input v-model="form.provider" type="text" placeholder="mock" />
+        </label>
+        <label>
+          <span>{{ t("experiments.model") }}</span>
+          <input v-model="form.model" type="text" placeholder="mock-1" />
+        </label>
+      </div>
+      <div class="strategy-picker">
+        <span>{{ t("experiments.strategy") }}</span>
+        <div class="strategy-options">
+          <button
+            v-for="version in strategyVersions"
+            :key="version.id"
+            type="button"
+            :class="{ selected: form.strategyVersionIds.includes(version.id) }"
+            @click="toggleStrategy(version.id)"
+          >
+            <strong>{{ version.name }}</strong>
+            <small>{{ version.id }}</small>
+          </button>
+        </div>
+      </div>
     </section>
 
     <section class="table-shell experiment-table">
@@ -264,6 +415,84 @@ watch(
   margin-top: 18px;
 }
 
+.create-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 16px;
+}
+
+.panel-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.panel-title h2 {
+  margin-top: 4px;
+  font-size: 18px;
+}
+
+.create-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.create-grid label,
+.strategy-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.create-grid span,
+.strategy-picker > span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.create-grid input,
+.create-grid select {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.strategy-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.strategy-options button {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  min-height: 52px;
+  padding: 9px;
+  text-align: left;
+}
+
+.strategy-options button.selected {
+  border-color: var(--tool);
+  background: rgba(49, 95, 125, 0.08);
+  box-shadow: inset 3px 0 0 var(--tool);
+}
+
+.strategy-options small {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .link-button {
   display: inline-flex;
   align-items: flex-start;
@@ -335,7 +564,9 @@ watch(
 
 @media (max-width: 900px) {
   .experiment-head,
-  .summary-strip {
+  .summary-strip,
+  .create-grid,
+  .strategy-options {
     grid-template-columns: 1fr;
   }
 

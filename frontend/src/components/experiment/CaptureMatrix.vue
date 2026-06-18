@@ -7,11 +7,23 @@ import type { ExperimentMetricRow } from "../../types/api";
 const props = defineProps<{
   rows: ExperimentMetricRow[];
   captureMatrix: Record<string, Record<string, boolean>>;
+  captureMatrixCounts?: Record<
+    string,
+    Record<string, { captured: boolean; captured_count: number; repeat_count: number; capture_rate: number }>
+  >;
 }>();
 
 const { t } = useI18n();
 const bugIds = computed(() => Object.keys(props.captureMatrix));
 const strategies = computed(() => props.rows.map((row) => ({ id: row.strategy_id, name: row.strategy_name })));
+
+function countLabel(bugId: string, strategyId: string): string {
+  const stats = props.captureMatrixCounts?.[bugId]?.[strategyId];
+  if (!stats) {
+    return "";
+  }
+  return `${stats.captured_count}/${stats.repeat_count}`;
+}
 </script>
 
 <template>
@@ -35,10 +47,12 @@ const strategies = computed(() => props.rows.map((row) => ({ id: row.strategy_id
               <span v-if="captureMatrix[bugId]?.[strategy.id]" class="evidence-ok">
                 <CheckCircle2 :size="16" aria-hidden="true" />
                 {{ t("comparison.captured") }}
+                <small v-if="countLabel(bugId, strategy.id)">{{ countLabel(bugId, strategy.id) }}</small>
               </span>
               <span v-else class="evidence-miss">
                 <XCircle :size="16" aria-hidden="true" />
                 {{ t("comparison.missed") }}
+                <small v-if="countLabel(bugId, strategy.id)">{{ countLabel(bugId, strategy.id) }}</small>
               </span>
             </td>
           </tr>
@@ -61,6 +75,13 @@ const strategies = computed(() => props.rows.map((row) => ({ id: row.strategy_id
   align-items: center;
   gap: 6px;
   font-weight: 700;
+}
+
+.evidence-ok small,
+.evidence-miss small {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .evidence-ok {

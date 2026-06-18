@@ -109,9 +109,13 @@ def test_experiment_runner_creates_clean_runs_replays_and_db_metrics(monkeypatch
     assert rows["react_reflection"]["reflection_acceptance_rate"] == 1.0
 
     matrix = metrics["capture_matrix"]
+    matrix_counts = metrics["capture_matrix_counts"]
     assert matrix["variant-wrong-status"]["direct"] is False
     assert matrix["variant-wrong-status"]["plan_execute"] is True
     assert matrix["variant-wrong-status"]["react_reflection"] is True
+    assert matrix_counts["variant-wrong-status"]["direct"]["captured_count"] == 0
+    assert matrix_counts["variant-wrong-status"]["direct"]["repeat_count"] == 1
+    assert matrix_counts["variant-wrong-status"]["plan_execute"]["capture_rate"] == 1.0
     assert metrics["capture_scope"]["unit"] == "bug_variant"
     assert metrics["capture_scope"]["single_variant_per_seeded_bug"] is True
     assert metrics["data_source"]["kind"] == "mock"
@@ -131,6 +135,8 @@ def test_experiment_runner_creates_clean_runs_replays_and_db_metrics(monkeypatch
         assert clean["clean_metrics"]["clean_replay_id"]
         assert clean_replay["collection_errors"] == 0
         assert clean_replay["duration_ms"] >= 0
+        assert clean["clean_metrics"]["flaky_check"]["stable"] is True
+        assert clean["clean_metrics"]["flaky_check"]["required_runs"] == 3
     for replay_result in metrics["experiment_replay_runs"]:
         assert replay_result["replay_metrics"]["clean_replay_id"]
         probe_check = replay_result["replay_metrics"]["probe_check"]
@@ -141,7 +147,7 @@ def test_experiment_runner_creates_clean_runs_replays_and_db_metrics(monkeypatch
     with Session(get_engine()) as session:
         assert session.scalar(select(func.count()).select_from(ExperimentCleanRun)) == 3
         assert session.scalar(select(func.count()).select_from(ExperimentReplayRun)) == 18
-        assert session.scalar(select(func.count()).select_from(ReplayModel)) == 21
+        assert session.scalar(select(func.count()).select_from(ReplayModel)) == 27
 
         strategy_key = {
             "sv-direct-v1": "direct",

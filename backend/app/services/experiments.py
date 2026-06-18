@@ -49,6 +49,7 @@ from eval.harness.replay import replay as replay_frozen_tests
 
 TRACE_ROOT = Path(__file__).resolve().parents[3]
 EXPERIMENT_WORK_ROOT = TRACE_ROOT / ".pytest_tmp_experiments"
+FLAKY_CLEAN_REPLAY_RUNS = 3
 
 
 @dataclass
@@ -505,7 +506,17 @@ def _copy_clean_snapshot(snapshot: ProjectSnapshot, dest: Path) -> Path:
     dest = _ensure_experiment_work_path(dest)
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(root, dest)
+    shutil.copytree(
+        root,
+        dest,
+        ignore=shutil.ignore_patterns(
+            ".trace_artifacts",
+            ".trace_junit.xml",
+            ".trace_pytest_report.json",
+            ".pytest_cache",
+            "__pycache__",
+        ),
+    )
     return dest
 
 
@@ -594,6 +605,14 @@ def _passed_nodeids_from_pytest_summary(summary: dict) -> set[str]:
     }
 
 
+def _nodeid_statuses_from_pytest_summary(summary: dict) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for case in summary.get("case_results", []):
+        if isinstance(case, dict) and case.get("nodeid"):
+            statuses[str(case["nodeid"])] = str(case.get("status") or "unknown")
+    return statuses
+
+
 def _compact_pytest_summary(summary: dict) -> dict:
     return {
         "collected": int(summary.get("collected", 0)),
@@ -604,6 +623,89 @@ def _compact_pytest_summary(summary: dict) -> dict:
         "duration_ms": int(summary.get("duration_ms") or 0),
         "exit_code": summary.get("exit_code"),
         "error": summary.get("error"),
+    }
+
+
+def _flaky_mismatch_reason(expected: dict[str, str], actual: dict[str, str]) -> str | None:
+    if set(expected) != set(actual):
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        parts = []
+        if missing:
+            parts.append("missing nodeids: " + ", ".join(missing))
+        if extra:
+            parts.append("extra nodeids: " + ", ".join(extra))
+        return "; ".join(parts)
+    changed = sorted(nodeid for nodeid in expected if expected[nodeid] != actual[nodeid])
+    if changed:
+        return "status changed: " + ", ".join(
+            f"{nodeid} {expected[nodeid]}->{actual[nodeid]}" for nodeid in changed
+        )
+    return None
+
+
+def _run_clean_flaky_gate(
+    session: Session,
+    *,
+    clean_run: ExperimentCleanRun,
+    artifact: RunArtifact,
+    target_snapshot: ProjectSnapshot,
+    baseline_replay: TestReplay,
+    baseline_statuses: dict[str, str],
+    timeout_seconds: int,
+    required_runs: int = FLAKY_CLEAN_REPLAY_RUNS,
+) -> dict:
+    replay_ids = [baseline_replay.id]
+    runs = [
+        {
+            "replay_id": baseline_replay.id,
+            "summary": _compact_pytest_summary(baseline_replay.pytest_summary or {}),
+            "nodeid_statuses": baseline_statuses,
+        }
+    ]
+    stable = True
+    reasons: list[str] = []
+
+    for index in range(1, required_runs):
+        replay_row, _capturing, _assertion_failures = _run_replay(
+            session,
+            clean_run=clean_run,
+            artifact=artifact,
+            target_snapshot=target_snapshot,
+            variant=None,
+            clean_passed=set(),
+            timeout_seconds=timeout_seconds,
+        )
+        replay_ids.append(replay_row.id)
+        statuses = _nodeid_statuses_from_pytest_summary(replay_row.pytest_summary or {})
+        summary = _compact_pytest_summary(replay_row.pytest_summary or {})
+        runs.append(
+            {
+                "replay_id": replay_row.id,
+                "summary": summary,
+                "nodeid_statuses": statuses,
+            }
+        )
+        mismatch = _flaky_mismatch_reason(baseline_statuses, statuses)
+        if replay_row.status != "completed":
+            stable = False
+            reasons.append(f"run {index + 1} failed: {replay_row.error_message or replay_row.error_code}")
+        if summary["collection_errors"] > 0:
+            stable = False
+            reasons.append(f"run {index + 1} had collection errors")
+        if mismatch:
+            stable = False
+            reasons.append(f"run {index + 1} mismatch: {mismatch}")
+
+    return {
+        "enabled": True,
+        "required_runs": required_runs,
+        "actual_runs": len(replay_ids),
+        "stable": stable,
+        "baseline_replay_id": baseline_replay.id,
+        "replay_ids": replay_ids,
+        "reasons": reasons,
+        "runs": runs,
     }
 
 
@@ -892,10 +994,29 @@ def run_experiment(session: Session, experiment_id: str) -> dict:
                         continue
 
                     clean_replay_passed = _passed_nodeids_from_pytest_summary(clean_replay_row.pytest_summary or {})
+                    clean_replay_statuses = _nodeid_statuses_from_pytest_summary(clean_replay_row.pytest_summary or {})
                     if clean_replay_summary["collection_errors"] > 0:
                         clean_metrics["clean_replay_matches_generation"] = False
                         clean_metrics["validity_status"] = "invalid_test_set"
                         clean_metrics["invalid_reason"] = "clean_replay_collection_error"
+                        clean_row.false_positive = False
+                        clean_row.clean_metrics = clean_metrics
+                        session.commit()
+                        continue
+
+                    flaky_check = _run_clean_flaky_gate(
+                        session,
+                        clean_run=clean_row,
+                        artifact=artifact,
+                        target_snapshot=snapshot,
+                        baseline_replay=clean_replay_row,
+                        baseline_statuses=clean_replay_statuses,
+                        timeout_seconds=60,
+                    )
+                    clean_metrics["flaky_check"] = flaky_check
+                    if not flaky_check["stable"]:
+                        clean_metrics["validity_status"] = "invalid_test_set"
+                        clean_metrics["invalid_reason"] = "flaky_clean_replay"
                         clean_row.false_positive = False
                         clean_row.clean_metrics = clean_metrics
                         session.commit()
@@ -1173,6 +1294,25 @@ def _capture_scope(session: Session, experiment: Experiment) -> dict:
     }
 
 
+def _capture_matrix_counts(variant_ids: list[str], runs_by_strategy: dict[str, list[MetricRun]]) -> dict:
+    matrix: dict[str, dict[str, dict[str, int | float | bool]]] = {}
+    for variant_id in variant_ids:
+        matrix[variant_id] = {}
+        for strategy_id, runs in runs_by_strategy.items():
+            evaluable_runs = [run for run in runs if not run.invalid_test_set]
+            captured_count = sum(
+                1 for run in evaluable_runs if run.variants.get(variant_id, {}).get("captured")
+            )
+            repeat_count = len(evaluable_runs)
+            matrix[variant_id][strategy_id] = {
+                "captured": captured_count > 0,
+                "captured_count": captured_count,
+                "repeat_count": repeat_count,
+                "capture_rate": (captured_count / repeat_count) if repeat_count else 0.0,
+            }
+    return matrix
+
+
 def _data_source(experiment: Experiment, rows: list[dict]) -> dict:
     providers = []
     models = []
@@ -1274,12 +1414,13 @@ def get_experiment_metrics(session: Session, experiment_id: str) -> dict:
         }
 
     variant_ids = _capture_matrix_variant_ids(session, experiment)
+    matrix_counts = _capture_matrix_counts(variant_ids, runs_by_strategy)
     matrix = {
         variant_id: {
-            strategy_id: any(run.variants.get(variant_id, {}).get("captured") for run in runs)
-            for strategy_id, runs in runs_by_strategy.items()
+            strategy_id: bool(stats.get("captured"))
+            for strategy_id, stats in by_strategy.items()
         }
-        for variant_id in variant_ids
+        for variant_id, by_strategy in matrix_counts.items()
     }
     # Keep the harness function in the call path for synthetic parity while using DB variant ids.
     if not variant_ids:
@@ -1341,6 +1482,7 @@ def get_experiment_metrics(session: Session, experiment_id: str) -> dict:
         "capture_scope": _capture_scope(session, experiment),
         "rows": rows,
         "capture_matrix": matrix,
+        "capture_matrix_counts": matrix_counts,
         "clean_runs": [_clean_run_payload(session, clean) for clean in clean_runs],
         "replay_runs": [
             {

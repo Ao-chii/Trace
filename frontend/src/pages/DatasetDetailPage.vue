@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowLeft, Bug, Database, GitBranch, RefreshCw } from "@lucide/vue";
-import { getEvalDataset } from "../api/evaluation";
+import { createEvalDataset, getEvalDataset } from "../api/evaluation";
 import JsonViewer from "../components/JsonViewer.vue";
 import { demoEvalDataset } from "../demo/staticRunFixture";
 import { useLatestRequest } from "../composables/useLatestRequest";
@@ -24,6 +24,15 @@ const dataset = shallowRef<EvalDatasetDetailOut | null>(null);
 const loading = ref(false);
 const errorMessage = ref<string | null>(null);
 const selectedTaskId = ref<string | null>(null);
+const creating = ref(false);
+const createMessage = ref<string | null>(null);
+const createForm = ref({
+  id: "",
+  name: "local eval dataset",
+  version: "v1",
+  description: "",
+  projectSnapshotIds: ""
+});
 
 const datasetRequest = useLatestRequest();
 
@@ -78,6 +87,33 @@ async function loadDataset() {
   }
 }
 
+async function submitDataset() {
+  if (props.dataSource !== "api") {
+    return;
+  }
+  creating.value = true;
+  createMessage.value = null;
+  errorMessage.value = null;
+  try {
+    const created = await createEvalDataset({
+      id: createForm.value.id.trim() || null,
+      name: createForm.value.name.trim(),
+      version: createForm.value.version.trim(),
+      description: createForm.value.description.trim() || null,
+      project_snapshot_ids: createForm.value.projectSnapshotIds
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    });
+    createMessage.value = `${t("datasets.created")}: ${created.id}`;
+    emit("navigate", `#/datasets/${created.id}`);
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : t("datasets.createFailed");
+  } finally {
+    creating.value = false;
+  }
+}
+
 onMounted(() => {
   void loadDataset();
 });
@@ -104,7 +140,42 @@ watch(
     </section>
 
     <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
+    <p v-if="createMessage" class="mode-note">{{ createMessage }}</p>
     <p v-if="loading" class="mode-note">{{ t("datasets.loading") }}</p>
+
+    <section v-if="props.dataSource === 'api'" class="subtle-panel create-dataset-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">CREATE DATASET</p>
+          <h2>{{ t("datasets.createTitle") }}</h2>
+        </div>
+        <button class="text-button" type="button" :disabled="creating" @click="submitDataset">
+          {{ creating ? t("datasets.creating") : t("datasets.create") }}
+        </button>
+      </div>
+      <div class="dataset-form-grid">
+        <label>
+          <span>{{ t("experiments.optionalId") }}</span>
+          <input v-model="createForm.id" type="text" placeholder="dataset-local-v1" />
+        </label>
+        <label>
+          <span>{{ t("experiments.name") }}</span>
+          <input v-model="createForm.name" type="text" />
+        </label>
+        <label>
+          <span>{{ t("datasets.version") }}</span>
+          <input v-model="createForm.version" type="text" />
+        </label>
+        <label>
+          <span>{{ t("projects.description") }}</span>
+          <input v-model="createForm.description" type="text" />
+        </label>
+        <label class="wide-field">
+          <span>{{ t("datasets.snapshots") }}</span>
+          <input v-model="createForm.projectSnapshotIds" type="text" placeholder="snapshot id, snapshot id" />
+        </label>
+      </div>
+    </section>
 
     <template v-if="dataset">
       <section class="hero-band subtle-panel">
@@ -247,7 +318,8 @@ watch(
 .detail-head,
 .hero-band,
 .metadata-grid,
-.dataset-grid {
+.dataset-grid,
+.create-dataset-panel {
   margin-top: 18px;
 }
 
@@ -309,11 +381,49 @@ watch(
 }
 
 .meta-tile,
+.create-dataset-panel,
 .task-list,
 .task-overview,
 .json-panel,
 .bug-card {
   padding: 18px;
+}
+
+.create-dataset-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.dataset-form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dataset-form-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.dataset-form-grid label span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.dataset-form-grid input {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.wide-field {
+  grid-column: span 2;
 }
 
 .meta-tile {
@@ -420,12 +530,17 @@ watch(
 @media (max-width: 1080px) {
   .hero-band,
   .metadata-grid,
-  .dataset-grid {
+  .dataset-grid,
+  .dataset-form-grid {
     grid-template-columns: 1fr;
   }
 
   .hero-band {
     display: grid;
+  }
+
+  .wide-field {
+    grid-column: auto;
   }
 }
 </style>

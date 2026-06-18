@@ -1,5 +1,6 @@
 import { requestJson } from "./client";
 import type {
+  ExperimentCreateRequest,
   ExperimentCleanRunOut,
   ExperimentDefinition,
   ExperimentMetricsResponse,
@@ -8,6 +9,13 @@ import type {
 
 export function listExperiments(): Promise<ExperimentDefinition[]> {
   return requestJson<ExperimentDefinition[]>("/api/v1/experiments");
+}
+
+export function createExperiment(body: ExperimentCreateRequest): Promise<ExperimentDefinition> {
+  return requestJson<ExperimentDefinition>("/api/v1/experiments", {
+    method: "POST",
+    body: JSON.stringify(body)
+  });
 }
 
 export function getExperiment(experimentId: string): Promise<ExperimentDefinition> {

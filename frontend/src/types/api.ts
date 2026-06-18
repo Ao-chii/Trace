@@ -80,6 +80,13 @@ export interface StrategyVersionOut {
   tool_schema_ref: string;
 }
 
+export interface StrategyOut {
+  id: string;
+  name: string;
+  workflow_type: string;
+  created_at: string;
+}
+
 export interface TestRunOut {
   id: string;
   test_plan_id: string;
@@ -318,6 +325,15 @@ export interface LlmOverride {
   temperature_policy: TemperaturePolicy;
   max_output_tokens: number | null;
   model_params: JsonObject;
+}
+
+export interface ExperimentCreateRequest {
+  id?: string | null;
+  name: string;
+  dataset_id: string;
+  strategy_version_ids: string[];
+  repeat_count: number;
+  llm_override?: Partial<LlmOverride> | null;
 }
 
 export interface ResolvedLlmSpec {
@@ -608,6 +624,18 @@ export interface ExperimentMetricsResponse {
   source_context_policy: SourceContextPolicy;
   rows: ExperimentMetricRow[];
   capture_matrix: Record<string, Record<string, boolean>>;
+  capture_matrix_counts?: Record<
+    string,
+    Record<
+      string,
+      {
+        captured: boolean;
+        captured_count: number;
+        repeat_count: number;
+        capture_rate: number;
+      }
+    >
+  >;
   clean_runs: CleanRunContract[];
   replay_runs: TestReplayContract[];
   experiment_replay_runs: ExperimentReplayRunContract[];
