@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.schemas.tools import AnalyzeProjectOutput, FunctionInfo, RouteInfo
+from app.schemas.tools import (
+    AnalyzeProjectOutput,
+    ExistingTestInfo,
+    FixtureInfo,
+    FunctionInfo,
+    ModelFieldInfo,
+    ModelInfo,
+    RouteInfo,
+    TestFunctionInfo as ExistingTestFunctionInfo,
+)
 from app.services.source_context import build_source_context_bundle
 from app.tools.analyze import analyze_project
 from app.tools.base import ToolContext
@@ -291,6 +300,68 @@ def test_missing_source_context_target_emits_retrieval_trace(tmp_path):
     assert "does_not_exist" in bundle.context_completeness.missing_targets
 
 
+def test_rg_fallback_resolves_unindexed_function_after_ast_slice(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "pricing.py").write_text(_SAMPLE, encoding="utf-8")
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["target_fn"], AnalyzeProjectOutput())
+
+    assert bundle.context_completeness.status == "complete"
+    assert bundle.snippets[0].source_path == "shop/pricing.py"
+    assert bundle.snippets[0].symbol == "target_fn"
+    assert bundle.snippets[0].retrieval_source == "rg"
+    assert "def target_fn" in bundle.source_context_text
+    assert "def helper" not in bundle.source_context_text
+
+
+def test_rg_fallback_unconfirmed_match_stays_incomplete(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "notes.py").write_text(
+        "TARGET_NAME = 'mystery_target'\n"
+        "def unrelated():\n"
+        "    return TARGET_NAME\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["mystery_target"], AnalyzeProjectOutput())
+
+    assert bundle.context_completeness.status == "incomplete"
+    assert bundle.snippets == []
+    assert "mystery_target" in bundle.context_completeness.missing_targets
+    assert "TARGET_NAME" not in bundle.source_context_text
+    rg_traces = [
+        trace
+        for trace in bundle.context_completeness.retrieval_trace
+        if trace.retrieval_source == "rg" and trace.source_path == "shop/notes.py"
+    ]
+    assert rg_traces
+    assert rg_traces[0].status == "missing"
+    assert rg_traces[0].line_range == {"start": 1, "end": 1}
+    assert any("not accepted as target source" in note for note in rg_traces[0].risk_notes)
+
+
+def test_rg_fallback_resolves_route_decorator_to_handler(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "api.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "\n"
+        "@router.get('/items')\n"
+        "def list_items():\n"
+        "    return []\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["GET /items"], AnalyzeProjectOutput())
+
+    assert bundle.context_completeness.status == "complete"
+    assert bundle.snippets[0].source_path == "shop/api.py"
+    assert bundle.snippets[0].symbol == "list_items"
+    assert bundle.snippets[0].target == "GET /items"
+    assert bundle.snippets[0].retrieval_source == "rg"
+    assert "@router.get('/items')" in bundle.source_context_text
+
+
 def test_path_traversal_target_is_denied(tmp_path):
     # 项目根外放一个“机密”文件，目标越界读它必须失败并标缺失，不能泄漏。
     (tmp_path.parent / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")
@@ -313,6 +384,106 @@ def test_total_bytes_budget_truncates(tmp_path):
     # 预算 3000 字节，单文件 ~2000，最多放下一个，后续被截断并记风险。
     assert len(bundle.snippets) < 5
     assert any("max_total_bytes" in note for note in bundle.context_completeness.risk_notes)
+
+
+def test_support_budget_truncation_keeps_target_and_marks_partial(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "shop" / "pricing.py").write_text(
+        "from pydantic import BaseModel\n"
+        "\n"
+        "class PriceRequest(BaseModel):\n"
+        "    sku: str\n"
+        "    quantity: int\n"
+        "    note: str = '" + "x" * 700 + "'\n"
+        "\n"
+        "def target_fn(req: PriceRequest):\n"
+        "    return req.quantity\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def client():\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
+    analysis = analyze_project(_ctx(tmp_path), AnalyzeProjectInput(target_scope=["target_fn"]))
+
+    bundle = build_source_context_bundle(
+        _ctx(tmp_path),
+        ["target_fn"],
+        analysis,
+        max_total_bytes=120,
+        max_support_snippets=4,
+    )
+
+    assert bundle.snippets[0].target_ref == "target_fn"
+    assert "def target_fn" in bundle.source_context_text
+    assert "class PriceRequest" not in bundle.source_context_text
+    assert bundle.context_completeness.status == "partial"
+    assert bundle.context_completeness.context_incomplete is True
+    traces = {trace.target: trace for trace in bundle.context_completeness.retrieval_trace}
+    assert traces["target_fn"].status == "resolved"
+    assert traces["model:PriceRequest"].status == "truncated"
+    assert any("support context truncated by max_total_bytes" in note for note in bundle.context_completeness.risk_notes)
+
+
+def test_support_context_order_is_source_kind_priority(tmp_path):
+    analysis = AnalyzeProjectOutput(
+        models=[
+            ModelInfo(
+                name="PriceRequest",
+                file="shop/api.py",
+                fields=[ModelFieldInfo(name="sku")],
+            )
+        ],
+        fixtures=[FixtureInfo(name="client", file="tests/conftest.py", line=3)],
+        existing_tests=[
+            ExistingTestInfo(
+                path="tests/test_pricing.py",
+                test_functions=[
+                    ExistingTestFunctionInfo(
+                        name="test_existing",
+                        line=3,
+                        estimated_nodeid="tests/test_pricing.py::test_existing",
+                    )
+                ],
+            )
+        ],
+    )
+
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "shop" / "api.py").write_text(
+        "class PriceRequest:\n"
+        "    sku: str\n"
+        "\n"
+        "def target_fn(req):\n"
+        "    return req.sku\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "def client():\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_pricing.py").write_text(
+        "def test_existing():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    analysis.functions.append(FunctionInfo(name="target_fn", signature="target_fn(req)", file="shop/api.py"))
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["target_fn"], analysis)
+
+    assert [snippet.source_kind for snippet in bundle.snippets] == [
+        "target_source",
+        "model_schema",
+        "fixture",
+        "existing_test",
+    ]
 
 
 def test_max_snippets_truncation_marks_partial(tmp_path):

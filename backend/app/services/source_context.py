@@ -6,9 +6,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.schemas.evaluation import ContextCompletenessEvidence, SourceContextRetrievalTrace, SourceContextSnippet
-from app.schemas.tools import AnalyzeProjectOutput, ReadFileInput
+from app.schemas.tools import AnalyzeProjectOutput, ReadFileInput, RgSearchInput, RgSearchMatch
 from app.tools.base import ToolContext
 from app.tools.fs_tools import read_file
+from app.tools.search import rg_search
+
+
+_SOURCE_KIND_PRIORITY = {
+    "target_source": 0,
+    "model_schema": 1,
+    "fixture": 2,
+    "existing_test": 3,
+    "failure_context": 4,
+    "fallback_file": 5,
+}
 
 
 @dataclass(frozen=True)
@@ -63,7 +74,8 @@ def build_source_context_bundle(
     retrieval_trace: list[SourceContextRetrievalTrace] = []
     seen: set[tuple[str, str | None]] = set()
 
-    targets, unresolved = _resolve_targets(ctx, target_scope, analysis)
+    targets, unresolved, pre_read_trace = _resolve_targets(ctx, target_scope, analysis)
+    retrieval_trace.extend(pre_read_trace)
     # 连「目标 -> 文件」都映射不到的，先记进缺失，别让它们在记录里凭空消失。
     missing_targets.extend(unresolved)
     for raw in unresolved:
@@ -224,12 +236,16 @@ def build_source_context_bundle(
             retrieval_trace=retrieval_trace,
         )
 
+    support_incomplete = _support_context_incomplete(retrieval_trace)
     if target_snippet_count == 0:
         status = "incomplete"
         risk_notes.append("no source snippet could be read")
     elif missing_targets:
         status = "partial"
         risk_notes.append("some source targets were unavailable")
+    elif support_incomplete:
+        status = "partial"
+        risk_notes.append("some support context was unavailable")
     else:
         status = "complete"
 
@@ -250,7 +266,7 @@ def build_source_context_bundle(
 
 def _resolve_targets(
     ctx: ToolContext, target_scope: list[str], analysis: AnalyzeProjectOutput | None
-) -> tuple[list[_Target], list[str]]:
+) -> tuple[list[_Target], list[str], list[SourceContextRetrievalTrace]]:
     if not target_scope:
         # 没给目标：退回少量默认入口文件整文件读，保持 demo 可跑。
         defaults = ["calc.py", "app.py", "main.py"]
@@ -265,17 +281,24 @@ def _resolve_targets(
             )
             for name in defaults
             if (ctx.root / name).exists()
-        ], []
+        ], [], []
 
     targets: list[_Target] = []
     unresolved: list[str] = []
+    retrieval_trace: list[SourceContextRetrievalTrace] = []
     for raw in target_scope:
         target = _resolve_one(ctx, str(raw), analysis)
         if target is not None:
             targets.append(target)
+            continue
+
+        rg_target, rg_trace = _resolve_one_with_rg(ctx, str(raw))
+        retrieval_trace.extend(rg_trace)
+        if rg_target is not None:
+            targets.append(rg_target)
         else:
             unresolved.append(str(raw))
-    return targets, unresolved
+    return targets, unresolved, retrieval_trace
 
 
 def _resolve_one(ctx: ToolContext, raw: str, analysis: AnalyzeProjectOutput | None) -> _Target | None:
@@ -311,6 +334,8 @@ def _resolve_one(ctx: ToolContext, raw: str, analysis: AnalyzeProjectOutput | No
             )
 
     # 直接是一个文件路径：整文件。
+    if _looks_like_route_target(norm):
+        return None
     if norm.endswith(".py") or "/" in norm:
         return _Target(
             raw=raw,
@@ -322,6 +347,67 @@ def _resolve_one(ctx: ToolContext, raw: str, analysis: AnalyzeProjectOutput | No
         )
 
     return None
+
+
+def _resolve_one_with_rg(ctx: ToolContext, raw: str) -> tuple[_Target | None, list[SourceContextRetrievalTrace]]:
+    query = _rg_query_for_target(raw)
+    if not query:
+        return None, []
+
+    try:
+        out = rg_search(ctx, RgSearchInput(query=query, path=".", glob="*.py", max_matches=8))
+    except Exception as exc:
+        return None, [
+            _trace(
+                target=raw,
+                source_kind="target_source",
+                retrieval_source="rg",
+                status="error",
+                confidence=0.0,
+                risk_notes=[f"rg fallback failed: {type(exc).__name__}"],
+            )
+        ]
+
+    traces: list[SourceContextRetrievalTrace] = []
+    route_method, route_path = _route_target_parts(raw)
+    symbol = _symbol_query_for_target(raw)
+    for match in _rank_rg_matches(ctx, out.matches):
+        try:
+            source = read_file(ctx, ReadFileInput(path=match.source_path, max_bytes=24000))
+        except Exception:
+            traces.append(_rg_candidate_trace(raw, match, "rg candidate file could not be read"))
+            continue
+
+        if route_path:
+            handler = _route_handler_for_path(source.content, route_method, route_path)
+            if handler is not None:
+                return (
+                    _Target(
+                        raw=raw,
+                        rel_path=match.source_path,
+                        symbol=handler,
+                        source_kind="target_source",
+                        retrieval_source="rg",
+                        confidence=_confirmed_rg_confidence(match),
+                    ),
+                    traces,
+                )
+        elif symbol and _slice_symbol(source.content, symbol) is not None:
+            return (
+                _Target(
+                    raw=raw,
+                    rel_path=match.source_path,
+                    symbol=symbol,
+                    source_kind="target_source",
+                    retrieval_source="rg",
+                    confidence=_confirmed_rg_confidence(match),
+                ),
+                traces,
+            )
+
+        traces.append(_rg_candidate_trace(raw, match, "rg lexical match was not accepted as target source"))
+
+    return None, traces
 
 
 def _analysis_match(analysis: AnalyzeProjectOutput, target: str) -> _AnalysisMatch | None:
@@ -358,6 +444,117 @@ def _analysis_match(analysis: AnalyzeProjectOutput, target: str) -> _AnalysisMat
                 confidence=1.0,
             )
     return None
+
+
+def _rg_query_for_target(value: str) -> str | None:
+    _method, route_path = _route_target_parts(value)
+    if route_path:
+        return route_path
+    symbol = _symbol_query_for_target(value)
+    return symbol or None
+
+
+def _symbol_query_for_target(value: str) -> str:
+    norm = value.strip()
+    if norm.startswith("route:"):
+        norm = norm.removeprefix("route:").strip()
+    if _looks_like_route_target(norm):
+        return ""
+    if "::" in norm and norm.split("::", 1)[0].endswith(".py"):
+        norm = norm.split("::", 1)[1]
+    elif ":" in norm and norm.split(":", 1)[0].endswith(".py"):
+        norm = norm.split(":", 1)[1]
+    return norm.rsplit(".", 1)[-1].strip()
+
+
+def _rank_rg_matches(ctx: ToolContext, matches: list[RgSearchMatch]) -> list[RgSearchMatch]:
+    generated_tests_dir = ctx.relpath(ctx.test_write_dir)
+    return sorted(
+        matches,
+        key=lambda match: (
+            _is_generated_test_path(match.source_path, generated_tests_dir),
+            _is_probable_test_path(match.source_path),
+            match.source_path,
+            match.line_number,
+        ),
+    )
+
+
+def _is_probable_test_path(path: str) -> bool:
+    norm = path.replace("\\", "/")
+    name = Path(norm).name
+    return norm.startswith("tests/") or "/tests/" in norm or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _confirmed_rg_confidence(match: RgSearchMatch) -> float:
+    return min(0.75, match.confidence + 0.2)
+
+
+def _rg_candidate_trace(raw: str, match: RgSearchMatch, note: str) -> SourceContextRetrievalTrace:
+    return _trace(
+        trace_id=match.trace_id,
+        target=raw,
+        source_kind="target_source",
+        retrieval_source="rg",
+        status="missing",
+        source_path=match.source_path,
+        start_line=match.line_number,
+        end_line=match.line_number,
+        confidence=match.confidence,
+        content_hash=match.content_hash,
+        risk_notes=[note],
+    )
+
+
+def _looks_like_route_target(value: str) -> bool:
+    _method, route_path = _route_target_parts(value)
+    return route_path is not None
+
+
+def _route_target_parts(value: str) -> tuple[str | None, str | None]:
+    norm = value.strip()
+    if norm.startswith("route:"):
+        norm = norm.removeprefix("route:").strip()
+    parts = norm.split(maxsplit=1)
+    if len(parts) == 2 and parts[0].upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}:
+        path = parts[1].strip()
+        return (parts[0].upper(), path) if path.startswith("/") else (None, None)
+    return (None, norm) if norm.startswith("/") else (None, None)
+
+
+def _route_handler_for_path(content: str, method: str | None, path: str) -> str | None:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            route = _route_decorator_parts(decorator)
+            if route is None:
+                continue
+            decorator_method, decorator_path = route
+            if decorator_path == path and (method is None or decorator_method == method):
+                return node.name
+    return None
+
+
+def _route_decorator_parts(decorator: ast.AST) -> tuple[str, str] | None:
+    if not isinstance(decorator, ast.Call):
+        return None
+    func = decorator.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    method = func.attr.upper()
+    if method not in {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}:
+        return None
+    if not decorator.args:
+        return None
+    first_arg = decorator.args[0]
+    if not isinstance(first_arg, ast.Constant) or not isinstance(first_arg.value, str):
+        return None
+    return method, first_arg.value
 
 
 def _route_path_without_method(value: str) -> str:
@@ -414,7 +611,7 @@ def _append_support_context(
     risk_notes: list[str],
     retrieval_trace: list[SourceContextRetrievalTrace],
 ) -> int:
-    support = _support_targets(ctx, analysis)
+    support = _sort_targets(_support_targets(ctx, analysis))
     if len(support) > max_support_snippets:
         risk_notes.append("support context truncated by max_support_snippets")
         for target in support[max_support_snippets:]:
@@ -580,6 +777,23 @@ def _support_targets(ctx: ToolContext, analysis: AnalyzeProjectOutput) -> list[_
                 )
             )
     return targets
+
+
+def _sort_targets(targets: list[_Target]) -> list[_Target]:
+    return sorted(
+        targets,
+        key=lambda target: (
+            _SOURCE_KIND_PRIORITY.get(target.source_kind, 99),
+            target.rel_path,
+            target.symbol or "",
+            target.raw,
+        ),
+    )
+
+
+def _support_context_incomplete(retrieval_trace: list[SourceContextRetrievalTrace]) -> bool:
+    support_kinds = {"model_schema", "fixture", "existing_test", "failure_context"}
+    return any(trace.source_kind in support_kinds and trace.status != "resolved" for trace in retrieval_trace)
 
 
 def _trace_id(*parts: object) -> str:

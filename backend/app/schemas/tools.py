@@ -41,6 +41,36 @@ class ReadFileOutput(BaseModel):
     bytes: int = 0
 
 
+# ---------- rg_search ----------
+class RgSearchInput(BaseModel):
+    query: str = Field(min_length=1)
+    path: str = "."
+    glob: Optional[str] = "*.py"
+    case_sensitive: bool = True
+    max_matches: int = Field(default=50, ge=1, le=500)
+    max_file_bytes: int = Field(default=256_000, ge=1)
+
+
+class RgSearchMatch(BaseModel):
+    source_path: str
+    line_number: int = Field(ge=1)
+    line_range: dict[str, int]
+    line_text: str
+    content_hash: str
+    trace_id: str
+    confidence: float = Field(ge=0, le=1)
+    retrieval_source: Literal["rg"] = "rg"
+    engine: Literal["rg", "python_fallback"]
+
+
+class RgSearchOutput(BaseModel):
+    query: str
+    matches: list[RgSearchMatch] = Field(default_factory=list)
+    truncated: bool = False
+    engine: Literal["rg", "python_fallback"]
+    warnings: list[str] = Field(default_factory=list)
+
+
 # ---------- analyze_project ----------
 class AnalyzeProjectInput(BaseModel):
     snapshot_id: Optional[str] = None
