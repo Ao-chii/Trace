@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 _SKIP_NAMES = {"skip", "skipif", "xfail"}
 _BROAD_EXC = {"Exception", "BaseException"}
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
+_EXCEPTION_BASES_ENV_KEY = "__trace_contract_guard_exception_bases__"
 _PYTEST_BUILTIN_FIXTURES = {
     "cache",
     "capsys",
@@ -309,13 +310,15 @@ def _source_backed_oracle_violations(
     functions = _source_functions(source_context)
     if not functions:
         return []
+    exception_bases = _source_exception_bases(source_context)
 
     violations: list[str] = []
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for base_env in _parametrize_envs(fn):
-            env: dict[str, Any] = dict(base_env)
+            env = _eval_base_env(exception_bases)
+            env.update(base_env)
             tainted_names: set[str] = set()
             for stmt in fn.body:
                 _remember_static_assignment(stmt, functions, env, tainted_names)
@@ -336,6 +339,7 @@ def _route_response_oracle_violations(tree: ast.AST, source_context: str) -> lis
     if not source_context.strip():
         return []
     functions = _source_functions(source_context)
+    exception_bases = _source_exception_bases(source_context)
     routes = _route_handlers_from_source_context(source_context)
     if not functions or not routes:
         return []
@@ -348,7 +352,7 @@ def _route_response_oracle_violations(tree: ast.AST, source_context: str) -> lis
             continue
         for base_env in _parametrize_envs(fn):
             env = dict(base_env)
-            global_env: dict[str, Any] = {}
+            global_env = _eval_base_env(exception_bases)
             tainted_names: set[str] = set()
             for stmt in fn.body:
                 _remember_monkeypatch_global(stmt, functions, env, global_env)
@@ -616,6 +620,55 @@ def _source_functions(source_context: str) -> dict[str, ast.FunctionDef | ast.As
     return functions
 
 
+def _source_exception_bases(source_context: str) -> dict[str, set[str]]:
+    chunks = re.findall(r"```(?:python)?\s*(.*?)```", source_context, flags=re.DOTALL)
+    if not chunks:
+        chunks = [source_context]
+    direct: dict[str, set[str]] = {}
+    for chunk in chunks:
+        try:
+            tree = ast.parse(chunk)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases: set[str] = set()
+            for base in node.bases:
+                name = _attr_chain(base)
+                if not name:
+                    continue
+                bases.add(name)
+                bases.add(name.rsplit(".", 1)[-1])
+            if bases:
+                direct.setdefault(node.name, set()).update(bases)
+    return {name: _expanded_exception_bases(name, direct) for name in direct}
+
+
+def _expanded_exception_bases(name: str, direct: dict[str, set[str]]) -> set[str]:
+    expanded: set[str] = set()
+    stack = list(direct.get(name, set()))
+    while stack:
+        base = stack.pop()
+        if base in expanded:
+            continue
+        expanded.add(base)
+        short = base.rsplit(".", 1)[-1]
+        stack.extend(direct.get(base, set()))
+        if short != base:
+            stack.extend(direct.get(short, set()))
+    return expanded
+
+
+def _eval_base_env(exception_bases: dict[str, set[str]]) -> dict[str, Any]:
+    return {_EXCEPTION_BASES_ENV_KEY: exception_bases} if exception_bases else {}
+
+
+def _exception_bases_from_env(env: dict[str, Any]) -> dict[str, set[str]]:
+    raw = env.get(_EXCEPTION_BASES_ENV_KEY)
+    return raw if isinstance(raw, dict) else {}
+
+
 def _remember_static_assignment(
     stmt: ast.stmt,
     functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
@@ -687,7 +740,11 @@ def _pytest_raises_source_violation(
                 if (
                     expected_exceptions
                     and exc.exc_type
-                    and not _exception_type_matches(expected_exceptions, exc.exc_type)
+                    and not _exception_type_matches(
+                        expected_exceptions,
+                        exc.exc_type,
+                        _exception_bases_from_env(env),
+                    )
                 ):
                     return "预期异常类型与目标源码不一致"
                 if expected_match and exc.message is not None:
@@ -737,9 +794,18 @@ def _pytest_raises_match_pattern(
     return None
 
 
-def _exception_type_matches(expected: set[str], actual: str) -> bool:
+def _exception_type_matches(
+    expected: set[str],
+    actual: str,
+    exception_bases: dict[str, set[str]] | None = None,
+) -> bool:
     actual_names = {actual, actual.rsplit(".", 1)[-1]}
     if expected & actual_names:
+        return True
+    lineage = set(actual_names)
+    for name in list(actual_names):
+        lineage.update(_expanded_exception_bases(name, exception_bases or {}))
+    if expected & lineage:
         return True
     return bool(expected & {"Exception", "BaseException"})
 
@@ -810,32 +876,9 @@ def _exec_statements(
                 return result
             continue
         if isinstance(stmt, ast.Try):
-            if stmt.finalbody:
-                raise _EvalUnknown()
-            try:
-                result = _exec_statements(stmt.body, functions, env)
-            except _EvalRaised as exc:
-                handled = False
-                for handler in stmt.handlers:
-                    if not _except_handler_matches(handler, exc):
-                        continue
-                    handled = True
-                    handler_env = dict(env)
-                    if handler.name:
-                        handler_env[handler.name] = exc
-                    result = _exec_statements(handler.body, functions, handler_env)
-                    if result is not _NO_RETURN:
-                        return result
-                    break
-                if not handled:
-                    raise
-            else:
-                if result is not _NO_RETURN:
-                    return result
-                if stmt.orelse:
-                    result = _exec_statements(stmt.orelse, functions, env)
-                    if result is not _NO_RETURN:
-                        return result
+            result = _exec_try_statement(stmt, functions, env)
+            if result is not _NO_RETURN:
+                return result
             continue
         if isinstance(stmt, ast.Assign):
             value = _eval_expr(stmt.value, functions, env)
@@ -857,13 +900,59 @@ def _exec_statements(
     return _NO_RETURN
 
 
-def _except_handler_matches(handler: ast.ExceptHandler, exc: _EvalRaised) -> bool:
+def _exec_try_statement(
+    stmt: ast.Try,
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    env: dict[str, Any],
+) -> Any:
+    result: Any = _NO_RETURN
+    pending_raise: _EvalRaised | None = None
+    try:
+        result = _exec_statements(stmt.body, functions, env)
+    except _EvalRaised as exc:
+        handled = False
+        for handler in stmt.handlers:
+            if not _except_handler_matches(handler, exc, env):
+                continue
+            handled = True
+            handler_env = dict(env)
+            if handler.name:
+                handler_env[handler.name] = exc
+            try:
+                result = _exec_statements(handler.body, functions, handler_env)
+            except _EvalRaised as handler_exc:
+                pending_raise = handler_exc
+                result = _NO_RETURN
+            break
+        if not handled:
+            pending_raise = exc
+    else:
+        if result is _NO_RETURN and stmt.orelse:
+            try:
+                result = _exec_statements(stmt.orelse, functions, env)
+            except _EvalRaised as else_exc:
+                pending_raise = else_exc
+
+    if stmt.finalbody:
+        try:
+            final_result = _exec_statements(stmt.finalbody, functions, env)
+        except _EvalRaised as final_exc:
+            raise final_exc
+        if final_result is not _NO_RETURN:
+            return final_result
+
+    if pending_raise is not None:
+        raise pending_raise
+    return result
+
+
+def _except_handler_matches(handler: ast.ExceptHandler, exc: _EvalRaised, env: dict[str, Any]) -> bool:
     if handler.type is None:
         return True
     expected = _exception_names(handler.type)
     if not expected or not exc.exc_type:
         return False
-    return _exception_type_matches(expected, exc.exc_type)
+    return _exception_type_matches(expected, exc.exc_type, _exception_bases_from_env(env))
 
 
 def _eval_raise(
@@ -977,7 +1066,13 @@ def _eval_expr(
         if name == "round":
             return round(*args, **kwargs)
         if name in functions:
-            return _eval_source_function(functions[name], args, kwargs, functions)
+            return _eval_source_function(
+                functions[name],
+                args,
+                kwargs,
+                functions,
+                _eval_base_env(_exception_bases_from_env(env)),
+            )
         raise _EvalUnknown()
     if isinstance(node, ast.Subscript):
         value = _eval_expr(node.value, functions, env)

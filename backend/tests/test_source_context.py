@@ -884,6 +884,47 @@ def test_lsp_missing_then_ast_grep_success_adds_risk_note(tmp_path, monkeypatch)
     assert any("lsp definition missing" in note for note in bundle.context_completeness.risk_notes)
 
 
+def test_target_resolution_ranks_multiple_provider_candidates_by_confidence(tmp_path, monkeypatch):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "lsp_bad.py").write_text("def target_fn():\n    return 'bad'\n", encoding="utf-8")
+    (tmp_path / "shop" / "ast_good.py").write_text("def target_fn():\n    return 'good'\n", encoding="utf-8")
+
+    def fake_lsp(ctx, raw):
+        return (
+            source_context_module._Target(
+                raw=raw,
+                rel_path="shop/lsp_bad.py",
+                symbol="target_fn",
+                retrieval_source="lsp",
+                confidence=0.3,
+            ),
+            [],
+        )
+
+    def fake_ast_grep(ctx, raw):
+        return (
+            source_context_module._Target(
+                raw=raw,
+                rel_path="shop/ast_good.py",
+                symbol="target_fn",
+                retrieval_source="ast_grep",
+                confidence=0.85,
+            ),
+            [],
+        )
+
+    monkeypatch.setattr(source_context_module, "_resolve_one_with_lsp", fake_lsp)
+    monkeypatch.setattr(source_context_module, "_resolve_one_with_ast_grep", fake_ast_grep)
+    monkeypatch.setattr(source_context_module, "_resolve_one_with_rg", lambda ctx, raw: (None, []))
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["target_fn"], AnalyzeProjectOutput())
+
+    assert bundle.snippets[0].source_path == "shop/ast_good.py"
+    assert bundle.snippets[0].retrieval_source == "ast_grep"
+    assert "return 'good'" in bundle.source_context_text
+    assert "return 'bad'" not in bundle.source_context_text
+
+
 def test_direct_dependency_budget_keeps_target_and_marks_partial(tmp_path):
     (tmp_path / "calc.py").write_text(_SAMPLE, encoding="utf-8")
     analysis = AnalyzeProjectOutput(
@@ -902,6 +943,48 @@ def test_direct_dependency_budget_keeps_target_and_marks_partial(tmp_path):
     )
     assert dependency_trace.status == "truncated"
     assert any("direct dependency context truncated by max_total_bytes" in note for note in bundle.context_completeness.risk_notes)
+
+
+def test_multiple_targets_keep_all_target_sources_before_dependency_budget(tmp_path):
+    (tmp_path / "calc.py").write_text(
+        "def helper_a():\n"
+        "    return 'xxxxxxxxxxxxxxxxxxxx'\n"
+        "\n"
+        "\n"
+        "def target_a():\n"
+        "    return helper_a()\n"
+        "\n"
+        "\n"
+        "def target_b():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    analysis = AnalyzeProjectOutput(
+        functions=[
+            FunctionInfo(name="target_a", signature="target_a()", file="calc.py"),
+            FunctionInfo(name="target_b", signature="target_b()", file="calc.py"),
+        ]
+    )
+
+    bundle = build_source_context_bundle(
+        _ctx(tmp_path),
+        ["target_a", "target_b"],
+        analysis,
+        max_total_bytes=95,
+    )
+
+    assert [snippet.target_ref for snippet in bundle.snippets] == ["target_a", "target_b"]
+    assert "def target_a" in bundle.source_context_text
+    assert "def target_b" in bundle.source_context_text
+    assert "def helper_a" not in bundle.source_context_text
+    assert "target_b" not in bundle.context_completeness.missing_targets
+    assert bundle.context_completeness.status == "partial"
+    dependency_trace = next(
+        trace
+        for trace in bundle.context_completeness.retrieval_trace
+        if trace.source_kind == "dependency" and trace.symbol == "helper_a"
+    )
+    assert dependency_trace.status == "truncated"
 
 
 def test_rg_fallback_unconfirmed_match_stays_incomplete(tmp_path):

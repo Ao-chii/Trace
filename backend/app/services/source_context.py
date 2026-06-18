@@ -36,6 +36,18 @@ _SOURCE_KIND_PRIORITY = {
     "fallback_file": 7,
 }
 
+_RETRIEVAL_SOURCE_PRIORITY = {
+    "direct_path": 0,
+    "framework_scanner": 1,
+    "analysis_ast": 2,
+    "lsp": 3,
+    "ast_grep": 4,
+    "pytest_scanner": 5,
+    "pytest_result": 6,
+    "rg": 7,
+    "default_path": 8,
+}
+
 
 @dataclass(frozen=True)
 class SourceContextBundle:
@@ -94,6 +106,7 @@ def build_source_context_bundle(
     risk_notes: list[str] = []
     retrieval_trace: list[SourceContextRetrievalTrace] = []
     seen: set[tuple[str, str | None]] = set()
+    resolved_target_sources: list[tuple[_Target, str, str]] = []
 
     targets, unresolved, pre_read_trace = _resolve_targets(ctx, target_scope, analysis)
     retrieval_trace.extend(pre_read_trace)
@@ -239,11 +252,15 @@ def build_source_context_bundle(
         )
         header = f"## {out.path}:{start_line}-{end_line} ({target_ref})"
         pieces.append(f"{header}\n```python\n{segment}\n```")
-        if target.source_kind == "target_source" and target.symbol and max_dependency_snippets > 0:
+        if target.source_kind == "target_source" and target.symbol:
+            resolved_target_sources.append((target, out.path, out.content))
+
+    for target, source_path, content in resolved_target_sources:
+        if max_dependency_snippets > 0:
             total_bytes = _append_direct_dependencies(
                 ctx,
-                out.path,
-                out.content,
+                source_path,
+                content,
                 target,
                 snippets,
                 pieces,
@@ -256,7 +273,8 @@ def build_source_context_bundle(
                 risk_notes=risk_notes,
                 retrieval_trace=retrieval_trace,
             )
-        if target.source_kind == "target_source" and target.symbol and max_reference_snippets > 0:
+    for target, _source_path, _content in resolved_target_sources:
+        if max_reference_snippets > 0:
             total_bytes = _append_lsp_references(
                 ctx,
                 target,
@@ -360,23 +378,38 @@ def _resolve_targets(
             targets.append(target)
             continue
 
+        candidates: list[_Target] = []
+        fallback_trace: list[SourceContextRetrievalTrace] = []
+
         lsp_target, lsp_trace = _resolve_one_with_lsp(ctx, str(raw))
-        retrieval_trace.extend(lsp_trace)
         if lsp_target is not None:
-            targets.append(lsp_target)
-            continue
+            candidates.append(lsp_target)
+        else:
+            fallback_trace.extend(lsp_trace)
 
         ast_target, ast_trace = _resolve_one_with_ast_grep(ctx, str(raw))
-        retrieval_trace.extend(ast_trace)
         if ast_target is not None:
-            targets.append(ast_target)
-            continue
+            candidates.append(ast_target)
+        else:
+            fallback_trace.extend(ast_trace)
 
         rg_target, rg_trace = _resolve_one_with_rg(ctx, str(raw))
-        retrieval_trace.extend(rg_trace)
         if rg_target is not None:
-            targets.append(rg_target)
+            candidates.append(rg_target)
         else:
+            fallback_trace.extend(rg_trace)
+
+        if candidates:
+            selected = _sort_targets(candidates)[0]
+            targets.append(selected)
+            selected_priority = _RETRIEVAL_SOURCE_PRIORITY.get(selected.retrieval_source, 99)
+            retrieval_trace.extend(
+                trace
+                for trace in fallback_trace
+                if _RETRIEVAL_SOURCE_PRIORITY.get(trace.retrieval_source, 99) < selected_priority
+            )
+        else:
+            retrieval_trace.extend(fallback_trace)
             unresolved.append(str(raw))
     return targets, unresolved, retrieval_trace
 
@@ -1895,11 +1928,22 @@ def _sort_targets(targets: list[_Target]) -> list[_Target]:
         targets,
         key=lambda target: (
             _SOURCE_KIND_PRIORITY.get(target.source_kind, 99),
+            _confidence_band(target.confidence),
+            _RETRIEVAL_SOURCE_PRIORITY.get(target.retrieval_source, 99),
+            -target.confidence,
             target.rel_path,
             target.symbol or "",
             target.raw,
         ),
     )
+
+
+def _confidence_band(confidence: float) -> int:
+    if confidence >= 0.7:
+        return 0
+    if confidence >= 0.4:
+        return 1
+    return 2
 
 
 def _support_context_incomplete(retrieval_trace: list[SourceContextRetrievalTrace]) -> bool:

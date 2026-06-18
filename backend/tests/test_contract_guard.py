@@ -771,6 +771,98 @@ def test_generation_contract_accepts_exception_oracle_matching_source_context():
     assert violations == []
 
 
+CUSTOM_EXCEPTION_SOURCE_CONTEXT = """## shop/pricing.py:11-22 (custom exceptions)
+```python
+class QuantityError(ValueError):
+    pass
+
+def validate_custom_quantity(quantity):
+    if quantity <= 0:
+        raise QuantityError(f"bad quantity: {quantity}")
+    return quantity
+
+def fallback_custom_quantity(quantity):
+    try:
+        validate_custom_quantity(quantity)
+    except ValueError:
+        return 1
+    return quantity
+```"""
+
+
+def test_generation_contract_accepts_custom_exception_subclass_oracle_matching_source_context():
+    content = (
+        "import pytest\n"
+        "from shop.pricing import validate_custom_quantity\n\n"
+        "def test_validate_custom_quantity_zero():\n"
+        "    with pytest.raises(ValueError, match='bad quantity: 0'):\n"
+        "        validate_custom_quantity(0)\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_validate_custom_quantity_zero",
+                "target_function": "validate_custom_quantity",
+                "assertion_summary": "自定义异常继承 ValueError",
+            }
+        ],
+        target_type="function",
+        target_ref="validate_custom_quantity",
+        source_context=CUSTOM_EXCEPTION_SOURCE_CONTEXT,
+    )
+
+    assert violations == []
+
+
+def test_generation_contract_rejects_custom_exception_wrong_parent_oracle():
+    content = (
+        "import pytest\n"
+        "from shop.pricing import validate_custom_quantity\n\n"
+        "def test_validate_custom_quantity_zero():\n"
+        "    with pytest.raises(TypeError):\n"
+        "        validate_custom_quantity(0)\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_validate_custom_quantity_zero",
+                "target_function": "validate_custom_quantity",
+                "assertion_summary": "自定义异常被误判为 TypeError",
+            }
+        ],
+        target_type="function",
+        target_ref="validate_custom_quantity",
+        source_context=CUSTOM_EXCEPTION_SOURCE_CONTEXT,
+    )
+
+    assert any("异常类型" in violation for violation in violations)
+
+
+def test_generation_contract_rejects_custom_exception_handler_return_oracle_that_contradicts_source_context():
+    content = (
+        "from shop.pricing import fallback_custom_quantity\n\n"
+        "def test_fallback_custom_quantity_zero():\n"
+        "    assert fallback_custom_quantity(0) == 0\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_fallback_custom_quantity_zero",
+                "target_function": "fallback_custom_quantity",
+                "assertion_summary": "自定义异常没有被父类 except 捕获",
+            }
+        ],
+        target_type="function",
+        target_ref="fallback_custom_quantity",
+        source_context=CUSTOM_EXCEPTION_SOURCE_CONTEXT,
+    )
+
+    assert any("源码行为" in violation for violation in violations)
+
+
 TRY_VALIDATE_QUANTITY_SOURCE_CONTEXT = VALIDATE_QUANTITY_SOURCE_CONTEXT + """
 ## shop/pricing.py:16-25 (normalize_quantity)
 ```python
@@ -884,6 +976,120 @@ def test_generation_contract_accepts_try_except_return_oracle_matching_source_co
     )
 
     assert violations == []
+
+
+FINALLY_VALIDATE_QUANTITY_SOURCE_CONTEXT = VALIDATE_QUANTITY_SOURCE_CONTEXT + """
+## shop/pricing.py:27-38 (finally_quantity)
+```python
+def cleanup_quantity(quantity):
+    try:
+        validate_quantity(quantity)
+    finally:
+        marker = "cleaned"
+    return quantity
+
+def forced_quantity(quantity):
+    try:
+        validate_quantity(quantity)
+    finally:
+        return 99
+```"""
+
+
+def test_generation_contract_accepts_finally_cleanup_exception_oracle_matching_source_context():
+    content = (
+        "import pytest\n"
+        "from shop.pricing import cleanup_quantity\n\n"
+        "def test_cleanup_quantity_zero_message():\n"
+        "    with pytest.raises(ValueError, match='quantity must be positive: 0'):\n"
+        "        cleanup_quantity(0)\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_cleanup_quantity_zero_message",
+                "target_function": "cleanup_quantity",
+                "assertion_summary": "finally 清理不改变源码异常",
+            }
+        ],
+        target_type="function",
+        target_ref="cleanup_quantity",
+        source_context=FINALLY_VALIDATE_QUANTITY_SOURCE_CONTEXT,
+    )
+
+    assert violations == []
+
+
+def test_generation_contract_rejects_finally_return_suppressed_exception_oracle():
+    content = (
+        "import pytest\n"
+        "from shop.pricing import forced_quantity\n\n"
+        "def test_forced_quantity_zero_raises():\n"
+        "    with pytest.raises(ValueError):\n"
+        "        forced_quantity(0)\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_forced_quantity_zero_raises",
+                "target_function": "forced_quantity",
+                "assertion_summary": "数量为 0 时仍抛出底层异常",
+            }
+        ],
+        target_type="function",
+        target_ref="forced_quantity",
+        source_context=FINALLY_VALIDATE_QUANTITY_SOURCE_CONTEXT,
+    )
+
+    assert any("没有可见 raise 证据" in violation for violation in violations)
+
+
+def test_generation_contract_accepts_finally_return_oracle_matching_source_context():
+    content = (
+        "from shop.pricing import forced_quantity\n\n"
+        "def test_forced_quantity_zero():\n"
+        "    assert forced_quantity(0) == 99\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_forced_quantity_zero",
+                "target_function": "forced_quantity",
+                "assertion_summary": "finally return 覆盖底层异常并返回 99",
+            }
+        ],
+        target_type="function",
+        target_ref="forced_quantity",
+        source_context=FINALLY_VALIDATE_QUANTITY_SOURCE_CONTEXT,
+    )
+
+    assert violations == []
+
+
+def test_generation_contract_rejects_finally_return_oracle_that_contradicts_source_context():
+    content = (
+        "from shop.pricing import forced_quantity\n\n"
+        "def test_forced_quantity_zero():\n"
+        "    assert forced_quantity(0) == 1\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_forced_quantity_zero",
+                "target_function": "forced_quantity",
+                "assertion_summary": "数量为 0 时 fallback 到 1",
+            }
+        ],
+        target_type="function",
+        target_ref="forced_quantity",
+        source_context=FINALLY_VALIDATE_QUANTITY_SOURCE_CONTEXT,
+    )
+
+    assert any("源码行为" in violation for violation in violations)
 
 
 def test_generation_contract_rejects_rounding_oracle_that_contradicts_source_context():
