@@ -50,6 +50,7 @@ from eval.harness.replay import replay as replay_frozen_tests
 TRACE_ROOT = Path(__file__).resolve().parents[3]
 EXPERIMENT_WORK_ROOT = TRACE_ROOT / ".pytest_tmp_experiments"
 FLAKY_CLEAN_REPLAY_RUNS = 3
+DEFAULT_REPLAY_TIMEOUT_SECONDS = 60
 
 
 @dataclass
@@ -626,6 +627,21 @@ def _compact_pytest_summary(summary: dict) -> dict:
     }
 
 
+def _replay_timeout_seconds(runtime_snapshot: dict | None, *, default: int = DEFAULT_REPLAY_TIMEOUT_SECONDS) -> int:
+    snapshot = runtime_snapshot or {}
+    for candidate in (
+        snapshot.get("timeout_seconds"),
+        (snapshot.get("budget_override") or {}).get("timeout_seconds") if isinstance(snapshot.get("budget_override"), dict) else None,
+    ):
+        if candidate is None:
+            continue
+        try:
+            return max(1, int(candidate))
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
 def _flaky_mismatch_reason(expected: dict[str, str], actual: dict[str, str]) -> str | None:
     if set(expected) != set(actual):
         missing = sorted(set(expected) - set(actual))
@@ -964,6 +980,7 @@ def run_experiment(session: Session, experiment_id: str) -> dict:
                     session.commit()
                     session.refresh(clean_row)
 
+                    replay_timeout_seconds = _replay_timeout_seconds(run.runtime_snapshot)
                     clean_replay_row, _clean_capturing, clean_assertion_failures = _run_replay(
                         session,
                         clean_run=clean_row,
@@ -971,7 +988,7 @@ def run_experiment(session: Session, experiment_id: str) -> dict:
                         target_snapshot=snapshot,
                         variant=None,
                         clean_passed=final_set.clean_passed,
-                        timeout_seconds=60,
+                        timeout_seconds=replay_timeout_seconds,
                     )
                     clean_replay_summary = _compact_pytest_summary(clean_replay_row.pytest_summary or {})
                     clean_metrics = dict(clean_row.clean_metrics or {})
@@ -1011,7 +1028,7 @@ def run_experiment(session: Session, experiment_id: str) -> dict:
                         target_snapshot=snapshot,
                         baseline_replay=clean_replay_row,
                         baseline_statuses=clean_replay_statuses,
-                        timeout_seconds=60,
+                        timeout_seconds=replay_timeout_seconds,
                     )
                     clean_metrics["flaky_check"] = flaky_check
                     if not flaky_check["stable"]:
@@ -1042,7 +1059,7 @@ def run_experiment(session: Session, experiment_id: str) -> dict:
                             target_snapshot=snapshot,
                             variant=variant,
                             clean_passed=clean_replay_passed,
-                            timeout_seconds=60,
+                            timeout_seconds=replay_timeout_seconds,
                         )
                         session.add(
                             ExperimentReplayRun(

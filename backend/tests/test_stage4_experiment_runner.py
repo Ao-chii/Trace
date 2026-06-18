@@ -27,7 +27,13 @@ from app.models import (
 )
 from app.services.evaluation import create_bug_variant, create_eval_dataset, create_eval_task, create_seeded_bug
 from app.services.evaluation_seed import DEMO_DATASET_ID, DEMO_SNAPSHOT_ID, seed_demo_dataset
-from app.services.experiments import ExperimentError, _copy_clean_snapshot, get_experiment_metrics, run_experiment
+from app.services.experiments import (
+    ExperimentError,
+    _copy_clean_snapshot,
+    _replay_timeout_seconds,
+    get_experiment_metrics,
+    run_experiment,
+)
 from app.services.strategies import seed_strategy_versions
 from app.workers.celery_app import celery_app
 from eval.demo.bugs import BUGS
@@ -589,6 +595,90 @@ def test_experiment_metrics_use_null_cost_when_no_bug_is_captured(monkeypatch, c
     assert row["cost_per_captured_bug"] is None
     assert row["cost_per_captured_bug_status"] == "no_bug_captured"
     assert row["metric_status"] == "evaluable_zero_capture"
+
+
+def test_replay_timeout_uses_runtime_snapshot():
+    assert _replay_timeout_seconds({"timeout_seconds": 17}) == 17
+    assert _replay_timeout_seconds({"budget_override": {"timeout_seconds": "23"}}) == 23
+    assert _replay_timeout_seconds({"timeout_seconds": "bad"}, default=11) == 11
+
+
+def test_experiment_marks_flaky_clean_replay_invalid_and_skips_variants(monkeypatch, clean_db):
+    _seed_v2_demo()
+
+    import app.services.experiments as experiment_module
+
+    def unstable_flaky_gate(
+        session,
+        *,
+        clean_run,
+        artifact,
+        target_snapshot,
+        baseline_replay,
+        baseline_statuses,
+        timeout_seconds,
+        required_runs=3,
+    ):
+        assert timeout_seconds == 120
+        return {
+            "enabled": True,
+            "required_runs": required_runs,
+            "actual_runs": required_runs,
+            "stable": False,
+            "baseline_replay_id": baseline_replay.id,
+            "replay_ids": [baseline_replay.id, "flaky-run-2", "flaky-run-3"],
+            "reasons": ["run 2 mismatch: status changed: tests/generated/test_generated.py::test_case passed->failed"],
+            "runs": [
+                {
+                    "replay_id": baseline_replay.id,
+                    "summary": {"collected": 1, "passed": 1, "failed": 0, "skipped": 0, "collection_errors": 0},
+                    "nodeid_statuses": baseline_statuses,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(experiment_module, "_run_clean_flaky_gate", unstable_flaky_gate)
+
+    with Session(get_engine()) as session:
+        experiment_module.create_experiment(
+            session,
+            experiment_id="exp-flaky-clean",
+            name="flaky clean",
+            dataset_id=DEMO_DATASET_ID,
+            strategy_version_ids=["sv-plan-v1"],
+            repeat_count=1,
+            llm_override={"provider": "mock", "model": "mock-1"},
+        )
+        result = run_experiment(session, "exp-flaky-clean")
+        assert result["status"] == "completed"
+
+        [clean] = list(
+            session.scalars(select(ExperimentCleanRun).where(ExperimentCleanRun.experiment_id == "exp-flaky-clean"))
+        )
+        assert clean.false_positive is False
+        assert clean.clean_metrics["validity_status"] == "invalid_test_set"
+        assert clean.clean_metrics["invalid_reason"] == "flaky_clean_replay"
+        assert clean.clean_metrics["flaky_check"]["stable"] is False
+        assert "status changed" in clean.clean_metrics["flaky_check"]["reasons"][0]
+
+        replays = list(
+            session.scalars(
+                select(ReplayModel)
+                .where(ReplayModel.experiment_clean_run_id == clean.id)
+                .order_by(ReplayModel.created_at.asc())
+            )
+        )
+        assert len(replays) == 1
+        assert replays[0].bug_variant_id is None
+        assert session.scalar(select(func.count()).select_from(ExperimentReplayRun)) == 0
+
+        metrics = get_experiment_metrics(session, "exp-flaky-clean")
+        [row] = metrics["rows"]
+        assert row["metric_status"] == "invalid_test_set"
+        assert row["invalid_test_set_count"] == 1
+        assert row["repeats"] == 0
+        assert row["captured_per_repeat"] == []
+        assert metrics["capture_matrix_counts"]["variant-wrong-status"]["plan_execute"]["repeat_count"] == 0
 
 
 def test_experiment_blocks_seeded_bug_run_when_target_source_context_is_missing(clean_db):

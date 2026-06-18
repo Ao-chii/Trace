@@ -36,6 +36,7 @@ const createForm = ref({
 
 const datasetRequest = useLatestRequest();
 
+const isCreateOnly = computed(() => props.dataSource === "api" && props.datasetId === "new");
 const selectedTask = computed<EvalTaskDetailOut | null>(() => {
   const current = dataset.value;
   if (!current) {
@@ -64,6 +65,13 @@ function capabilityText(task: EvalTaskDetailOut): string {
 
 async function loadDataset() {
   const requestSeq = datasetRequest.next();
+  if (isCreateOnly.value) {
+    dataset.value = null;
+    selectedTaskId.value = null;
+    errorMessage.value = null;
+    loading.value = false;
+    return;
+  }
   loading.value = true;
   errorMessage.value = null;
   try {
