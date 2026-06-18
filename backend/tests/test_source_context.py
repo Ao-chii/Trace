@@ -340,16 +340,25 @@ def test_missing_source_context_target_emits_retrieval_trace(tmp_path):
 
     bundle = build_source_context_bundle(_ctx(tmp_path), ["does_not_exist"], analysis)
 
-    [trace] = bundle.context_completeness.retrieval_trace
-    assert trace.status == "missing"
-    assert trace.source_kind == "target_source"
-    assert trace.target == "does_not_exist"
-    assert trace.source_path is None
-    assert trace.confidence == 0.0
+    traces = bundle.context_completeness.retrieval_trace
+    assert any(
+        trace.status == "missing"
+        and trace.retrieval_source == "ast_grep"
+        and trace.target == "does_not_exist"
+        and trace.confidence == 0.0
+        for trace in traces
+    )
+    assert any(
+        trace.status == "missing"
+        and trace.retrieval_source == "analysis_ast"
+        and trace.target == "does_not_exist"
+        and trace.source_path is None
+        for trace in traces
+    )
     assert "does_not_exist" in bundle.context_completeness.missing_targets
 
 
-def test_rg_fallback_resolves_unindexed_function_after_ast_slice(tmp_path):
+def test_ast_grep_fallback_resolves_unindexed_function_after_structural_match(tmp_path):
     (tmp_path / "shop").mkdir()
     (tmp_path / "shop" / "pricing.py").write_text(_SAMPLE, encoding="utf-8")
 
@@ -358,7 +367,7 @@ def test_rg_fallback_resolves_unindexed_function_after_ast_slice(tmp_path):
     assert bundle.context_completeness.status == "complete"
     assert bundle.snippets[0].source_path == "shop/pricing.py"
     assert bundle.snippets[0].symbol == "target_fn"
-    assert bundle.snippets[0].retrieval_source == "rg"
+    assert bundle.snippets[0].retrieval_source == "ast_grep"
     assert "def target_fn" in bundle.source_context_text
     assert "def helper" not in bundle.source_context_text
 
@@ -378,6 +387,9 @@ def test_rg_fallback_unconfirmed_match_stays_incomplete(tmp_path):
     assert bundle.snippets == []
     assert "mystery_target" in bundle.context_completeness.missing_targets
     assert "TARGET_NAME" not in bundle.source_context_text
+    ast_traces = [trace for trace in bundle.context_completeness.retrieval_trace if trace.retrieval_source == "ast_grep"]
+    assert ast_traces
+    assert ast_traces[0].status == "missing"
     rg_traces = [
         trace
         for trace in bundle.context_completeness.retrieval_trace
@@ -389,7 +401,7 @@ def test_rg_fallback_unconfirmed_match_stays_incomplete(tmp_path):
     assert any("not accepted as target source" in note for note in rg_traces[0].risk_notes)
 
 
-def test_rg_fallback_resolves_route_decorator_to_handler(tmp_path):
+def test_ast_grep_fallback_resolves_route_decorator_to_handler(tmp_path):
     (tmp_path / "shop").mkdir()
     (tmp_path / "shop" / "api.py").write_text(
         "from fastapi import APIRouter\n"
@@ -407,7 +419,7 @@ def test_rg_fallback_resolves_route_decorator_to_handler(tmp_path):
     assert bundle.snippets[0].source_path == "shop/api.py"
     assert bundle.snippets[0].symbol == "list_items"
     assert bundle.snippets[0].target == "GET /items"
-    assert bundle.snippets[0].retrieval_source == "rg"
+    assert bundle.snippets[0].retrieval_source == "ast_grep"
     assert "@router.get('/items')" in bundle.source_context_text
 
 

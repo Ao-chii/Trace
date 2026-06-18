@@ -7,10 +7,18 @@ from pathlib import Path
 from typing import Sequence
 
 from app.schemas.evaluation import ContextCompletenessEvidence, SourceContextRetrievalTrace, SourceContextSnippet
-from app.schemas.tools import AnalyzeProjectOutput, FailureDetail, ReadFileInput, RgSearchInput, RgSearchMatch
+from app.schemas.tools import (
+    AnalyzeProjectOutput,
+    AstGrepMatch,
+    AstGrepSearchInput,
+    FailureDetail,
+    ReadFileInput,
+    RgSearchInput,
+    RgSearchMatch,
+)
 from app.tools.base import ToolContext
 from app.tools.fs_tools import read_file
-from app.tools.search import rg_search
+from app.tools.search import ast_grep_search, rg_search
 
 
 _SOURCE_KIND_PRIORITY = {
@@ -310,6 +318,12 @@ def _resolve_targets(
             targets.append(target)
             continue
 
+        ast_target, ast_trace = _resolve_one_with_ast_grep(ctx, str(raw))
+        retrieval_trace.extend(ast_trace)
+        if ast_target is not None:
+            targets.append(ast_target)
+            continue
+
         rg_target, rg_trace = _resolve_one_with_rg(ctx, str(raw))
         retrieval_trace.extend(rg_trace)
         if rg_target is not None:
@@ -365,6 +379,56 @@ def _resolve_one(ctx: ToolContext, raw: str, analysis: AnalyzeProjectOutput | No
         )
 
     return None
+
+
+def _resolve_one_with_ast_grep(ctx: ToolContext, raw: str) -> tuple[_Target | None, list[SourceContextRetrievalTrace]]:
+    query, kind, method = _ast_grep_query_for_target(raw)
+    if not query:
+        return None, []
+
+    try:
+        out = ast_grep_search(
+            ctx,
+            AstGrepSearchInput(query=query, kind=kind, method=method, path=".", glob="*.py", max_matches=8),
+        )
+    except Exception as exc:
+        return None, [
+            _trace(
+                target=raw,
+                source_kind="target_source",
+                retrieval_source="ast_grep",
+                status="error",
+                confidence=0.0,
+                risk_notes=[f"ast-grep fallback failed: {type(exc).__name__}"],
+            )
+        ]
+
+    if not out.matches:
+        return None, [
+            _trace(
+                target=raw,
+                source_kind="target_source",
+                retrieval_source="ast_grep",
+                status="missing",
+                confidence=0.0,
+                risk_notes=["ast-grep found no structural match"],
+            )
+        ]
+
+    match = _rank_ast_grep_matches(ctx, out.matches)[0]
+    if not match.symbol:
+        return None, [_ast_grep_candidate_trace(raw, match, "ast-grep match did not include a symbol")]
+    return (
+        _Target(
+            raw=raw,
+            rel_path=match.source_path,
+            symbol=match.symbol,
+            source_kind="target_source",
+            retrieval_source="ast_grep",
+            confidence=match.confidence,
+        ),
+        [],
+    )
 
 
 def _resolve_one_with_rg(ctx: ToolContext, raw: str) -> tuple[_Target | None, list[SourceContextRetrievalTrace]]:
@@ -462,6 +526,45 @@ def _analysis_match(analysis: AnalyzeProjectOutput, target: str) -> _AnalysisMat
                 confidence=1.0,
             )
     return None
+
+
+def _ast_grep_query_for_target(value: str) -> tuple[str | None, str | None, str | None]:
+    method, route_path = _route_target_parts(value)
+    if route_path:
+        query = f"{method} {route_path}" if method else route_path
+        return query, "route", method
+    symbol = _symbol_query_for_target(value)
+    return (symbol, "function", None) if symbol else (None, None, None)
+
+
+def _rank_ast_grep_matches(ctx: ToolContext, matches: list[AstGrepMatch]) -> list[AstGrepMatch]:
+    generated_tests_dir = ctx.relpath(ctx.test_write_dir)
+    return sorted(
+        matches,
+        key=lambda match: (
+            _is_generated_test_path(match.source_path, generated_tests_dir),
+            _is_probable_test_path(match.source_path),
+            match.source_path,
+            match.line_range.get("start", 1),
+        ),
+    )
+
+
+def _ast_grep_candidate_trace(raw: str, match: AstGrepMatch, note: str) -> SourceContextRetrievalTrace:
+    return _trace(
+        trace_id=match.trace_id,
+        target=raw,
+        source_kind="target_source",
+        retrieval_source="ast_grep",
+        status="missing",
+        source_path=match.source_path,
+        symbol=match.symbol,
+        start_line=match.line_range["start"],
+        end_line=match.line_range["end"],
+        confidence=match.confidence,
+        content_hash=match.content_hash,
+        risk_notes=[note],
+    )
 
 
 def _rg_query_for_target(value: str) -> str | None:

@@ -2,6 +2,8 @@
 from app.schemas.tools import (
     AnalyzeProjectInput,
     AnalyzeProjectOutput,
+    AstGrepSearchInput,
+    AstGrepSearchOutput,
     ListFilesInput,
     ListFilesOutput,
     ReadFileInput,
@@ -17,7 +19,7 @@ from app.tools.analyze import analyze_project
 from app.tools.base import ToolContext, ToolRegistry, ToolSpec
 from app.tools.fs_tools import list_files, read_file
 from app.tools.run_pytest import run_pytest
-from app.tools.search import rg_search
+from app.tools.search import ast_grep_search, rg_search
 from app.tools.write_test import write_test_file
 
 __all__ = [
@@ -26,6 +28,7 @@ __all__ = [
     "ToolSpec",
     "default_registry",
     "analyze_project",
+    "ast_grep_search",
     "list_files",
     "read_file",
     "rg_search",
@@ -39,6 +42,7 @@ def default_registry() -> ToolRegistry:
     reg.register(ToolSpec("list_files", ListFilesInput, ListFilesOutput, list_files))
     reg.register(ToolSpec("read_file", ReadFileInput, ReadFileOutput, read_file))
     reg.register(ToolSpec("rg_search", RgSearchInput, RgSearchOutput, rg_search))
+    reg.register(ToolSpec("ast_grep_search", AstGrepSearchInput, AstGrepSearchOutput, ast_grep_search))
     reg.register(ToolSpec("analyze_project", AnalyzeProjectInput, AnalyzeProjectOutput, analyze_project))
     reg.register(ToolSpec("write_test_file", WriteTestFileInput, WriteTestFileOutput, write_test_file))
     reg.register(ToolSpec("run_pytest", RunPytestInput, RunPytestOutput, run_pytest))

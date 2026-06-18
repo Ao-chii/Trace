@@ -71,6 +71,40 @@ class RgSearchOutput(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+# ---------- ast_grep_search ----------
+class AstGrepSearchInput(BaseModel):
+    query: str = Field(min_length=1)
+    kind: Optional[Literal["function", "class", "route"]] = None
+    path: str = "."
+    glob: Optional[str] = "*.py"
+    method: Optional[Literal["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]] = None
+    max_matches: int = Field(default=50, ge=1, le=500)
+    max_file_bytes: int = Field(default=256_000, ge=1)
+
+
+class AstGrepMatch(BaseModel):
+    source_path: str
+    line_range: dict[str, int]
+    matched_text: str
+    symbol: Optional[str] = None
+    node_kind: Literal["function", "class", "route"]
+    content_hash: str
+    trace_id: str
+    confidence: float = Field(ge=0, le=1)
+    retrieval_source: Literal["ast_grep"] = "ast_grep"
+    engine: Literal["ast_grep", "python_ast_fallback"]
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class AstGrepSearchOutput(BaseModel):
+    query: str
+    kind: Optional[Literal["function", "class", "route"]] = None
+    matches: list[AstGrepMatch] = Field(default_factory=list)
+    truncated: bool = False
+    engine: Literal["ast_grep", "python_ast_fallback"]
+    warnings: list[str] = Field(default_factory=list)
+
+
 # ---------- analyze_project ----------
 class AnalyzeProjectInput(BaseModel):
     snapshot_id: Optional[str] = None
