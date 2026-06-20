@@ -1,12 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, shallowRef, watch } from "vue";
-import { ArrowLeft, Bug, Database, GitBranch, RefreshCw } from "@lucide/vue";
-import { createEvalDataset, getEvalDataset } from "../api/evaluation";
+import { ArrowLeft, Bug, CheckCircle2, Database, FlaskConical, GitBranch, RefreshCw } from "@lucide/vue";
+import { confirmSelectedMutationCandidate, createEvalDataset, dryRunTaskMutationDiscovery, getEvalDataset } from "../api/evaluation";
 import JsonViewer from "../components/JsonViewer.vue";
 import { demoEvalDataset } from "../demo/staticRunFixture";
 import { useLatestRequest } from "../composables/useLatestRequest";
 import { useI18n } from "../i18n";
-import type { EvalDatasetDetailOut, EvalTaskDetailOut, JsonObject } from "../types/api";
+import type {
+  EvalDatasetDetailOut,
+  EvalTaskDetailOut,
+  JsonObject,
+  JsonValue,
+  MutationCandidateContract,
+  MutationDiscoveryAuditReportContract,
+  MutationDiscoveryExclusionCode,
+  MutationDiscoveryResultContract,
+  MutationProbeSpec
+} from "../types/api";
 import type { DataSource } from "../types/ui";
 
 const props = defineProps<{
@@ -34,6 +44,24 @@ const createForm = ref({
   projectSnapshotIds: ""
 });
 
+const mutationDiscovery = shallowRef<MutationDiscoveryResultContract | null>(null);
+const mutationLoading = ref(false);
+const mutationConfirming = ref(false);
+const mutationError = ref<string | null>(null);
+const mutationMessage = ref<string | null>(null);
+const selectedCandidateId = ref<string | null>(null);
+const discoveryForm = ref({
+  sampleSeed: 0,
+  maxSelected: 20
+});
+const confirmForm = ref({
+  seededBugId: "",
+  variantId: "",
+  description: "",
+  expectedDetection: "",
+  variantName: "",
+  probeJson: '{\n  "target_kind": "function",\n  "probe": "",\n  "clean_value": null,\n  "buggy_value": null\n}'
+});
 const datasetRequest = useLatestRequest();
 
 const isCreateOnly = computed(() => props.dataSource === "api" && props.datasetId === "new");
@@ -54,6 +82,147 @@ const variantCount = computed<number>(() => {
     ? current.tasks.reduce((count, task) => count + task.seeded_bugs.reduce((inner, bug) => inner + bug.variants.length, 0), 0)
     : 0;
 });
+
+const selectedMutationCandidates = computed<MutationCandidateContract[]>(() =>
+  (mutationDiscovery.value?.candidates ?? []).filter((candidate) => candidate.selection.status === "selected")
+);
+const selectedCandidate = computed<MutationCandidateContract | null>(() => {
+  const candidates = mutationDiscovery.value?.candidates ?? [];
+  return candidates.find((candidate) => candidate.candidate_id === selectedCandidateId.value) ?? null;
+});
+const canConfirmMutation = computed(() =>
+  props.dataSource === "api" &&
+  Boolean(selectedTask.value) &&
+  Boolean(mutationDiscovery.value) &&
+  selectedCandidate.value?.selection.status === "selected" &&
+  !mutationConfirming.value
+);
+
+function resetMutationState() {
+  mutationDiscovery.value = null;
+  mutationError.value = null;
+  mutationMessage.value = null;
+  selectedCandidateId.value = null;
+}
+
+function asPositiveInteger(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function mutationStatusLabel(candidate: MutationCandidateContract): string {
+  return candidate.selection.status === "selected" ? t("datasets.selected") : t("datasets.notSelected");
+}
+
+function buildExclusionSummary(discovery: MutationDiscoveryResultContract): Partial<Record<MutationDiscoveryExclusionCode, number>> {
+  return discovery.exclusions.reduce<Partial<Record<MutationDiscoveryExclusionCode, number>>>((summary, exclusion) => {
+    summary[exclusion.reason_code] = (summary[exclusion.reason_code] ?? 0) + 1;
+    return summary;
+  }, {});
+}
+
+function buildAuditReport(task: EvalTaskDetailOut, discovery: MutationDiscoveryResultContract): MutationDiscoveryAuditReportContract {
+  return {
+    schema_version: "v2.mutation_discovery_audit",
+    generated_at: new Date().toISOString(),
+    eval_task_id: task.id,
+    dataset_id: task.dataset_id,
+    source_snapshot_id: task.project_snapshot_id,
+    target_scope: task.target_scope,
+    sample_seed: discovery.sample_seed,
+    max_selected: discovery.max_selected,
+    dry_run: true,
+    writes_database: false,
+    runs_replay: false,
+    selected_candidate_ids: discovery.candidates
+      .filter((candidate) => candidate.selection.status === "selected")
+      .map((candidate) => candidate.candidate_id),
+    exclusion_summary: buildExclusionSummary(discovery),
+    discovery
+  };
+}
+
+function parseProbeJson(): MutationProbeSpec {
+  const parsed = JSON.parse(confirmForm.value.probeJson) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(t("datasets.probeJsonInvalid"));
+  }
+  const probe = parsed as Partial<MutationProbeSpec>;
+  if (typeof probe.target_kind !== "string" || typeof probe.probe !== "string" || !probe.target_kind.trim() || !probe.probe.trim()) {
+    throw new Error(t("datasets.probeJsonInvalid"));
+  }
+  if (!("clean_value" in probe) || !("buggy_value" in probe)) {
+    throw new Error(t("datasets.probeJsonInvalid"));
+  }
+  return {
+    target_kind: probe.target_kind,
+    probe: probe.probe,
+    clean_value: probe.clean_value as JsonValue,
+    buggy_value: probe.buggy_value as JsonValue
+  };
+}
+
+async function runMutationDiscovery() {
+  const task = selectedTask.value;
+  if (props.dataSource !== "api" || !task) {
+    return;
+  }
+  mutationLoading.value = true;
+  mutationError.value = null;
+  mutationMessage.value = null;
+  try {
+    const result = await dryRunTaskMutationDiscovery(task.id, {
+      sample_seed: asPositiveInteger(discoveryForm.value.sampleSeed, 0),
+      max_selected: asPositiveInteger(discoveryForm.value.maxSelected, 20)
+    });
+    mutationDiscovery.value = result;
+    selectedCandidateId.value = selectedMutationCandidates.value[0]?.candidate_id ?? null;
+    mutationMessage.value = t("datasets.discoveryComplete");
+  } catch (error) {
+    mutationDiscovery.value = null;
+    selectedCandidateId.value = null;
+    mutationError.value = error instanceof Error ? error.message : t("datasets.discoveryFailed");
+  } finally {
+    mutationLoading.value = false;
+  }
+}
+
+async function confirmMutationCandidate() {
+  const task = selectedTask.value;
+  const discovery = mutationDiscovery.value;
+  const candidate = selectedCandidate.value;
+  if (!task || !discovery || !candidate || candidate.selection.status !== "selected") {
+    mutationError.value = t("datasets.selectCandidateFirst");
+    return;
+  }
+  mutationConfirming.value = true;
+  mutationError.value = null;
+  mutationMessage.value = null;
+  try {
+    const probe = parseProbeJson();
+    const confirmed = await confirmSelectedMutationCandidate(task.id, {
+      audit_report: buildAuditReport(task, discovery),
+      candidate_id: candidate.candidate_id,
+      probe,
+      bug_type: "auto_mutation",
+      seeded_bug_id: confirmForm.value.seededBugId.trim() || null,
+      variant_id: confirmForm.value.variantId.trim() || null,
+      description: confirmForm.value.description.trim() || null,
+      expected_detection: confirmForm.value.expectedDetection.trim() || null,
+      variant_name: confirmForm.value.variantName.trim() || null
+    });
+    mutationMessage.value = `${t("datasets.confirmedMutation")}: ${confirmed.id}`;
+    await loadDataset();
+    mutationDiscovery.value = null;
+    selectedCandidateId.value = null;
+  } catch (error) {
+    mutationError.value = error instanceof Error ? error.message : t("datasets.confirmFailed");
+  } finally {
+    mutationConfirming.value = false;
+  }
+}
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleString();
@@ -125,6 +294,13 @@ async function submitDataset() {
 onMounted(() => {
   void loadDataset();
 });
+
+watch(
+  () => selectedTask.value?.id,
+  () => {
+    resetMutationState();
+  }
+);
 
 watch(
   () => [props.datasetId, props.dataSource],
@@ -273,6 +449,120 @@ watch(
             <JsonViewer :value="selectedTask.target_scope" :max-depth="5" :max-array-items="20" />
           </article>
 
+          <article v-if="props.dataSource === 'api'" class="subtle-panel mutation-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">AUTO MUTATION V0</p>
+                <h3>{{ t("datasets.mutationDiscovery") }}</h3>
+              </div>
+              <FlaskConical :size="18" aria-hidden="true" />
+            </div>
+
+            <div class="mutation-controls">
+              <label>
+                <span>{{ t("datasets.sampleSeed") }}</span>
+                <input v-model.number="discoveryForm.sampleSeed" type="number" min="0" />
+              </label>
+              <label>
+                <span>{{ t("datasets.maxSelected") }}</span>
+                <input v-model.number="discoveryForm.maxSelected" type="number" min="0" />
+              </label>
+              <button class="text-button" type="button" :disabled="mutationLoading" @click="runMutationDiscovery">
+                {{ mutationLoading ? t("datasets.discovering") : t("datasets.runDiscovery") }}
+              </button>
+            </div>
+
+            <p v-if="mutationError" class="error-banner compact-banner">{{ mutationError }}</p>
+            <p v-if="mutationMessage" class="mode-note compact-note">{{ mutationMessage }}</p>
+
+            <div v-if="mutationDiscovery" class="mutation-summary">
+              <span>
+                <strong>{{ mutationDiscovery.candidates.length }}</strong>
+                <small>{{ t("datasets.candidates") }}</small>
+              </span>
+              <span>
+                <strong>{{ mutationDiscovery.selected_count }}</strong>
+                <small>{{ t("datasets.selected") }}</small>
+              </span>
+              <span>
+                <strong>{{ mutationDiscovery.excluded_count }}</strong>
+                <small>{{ t("datasets.excluded") }}</small>
+              </span>
+            </div>
+
+            <div v-if="mutationDiscovery?.candidates.length" class="table-shell mutation-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{{ t("experiments.status") }}</th>
+                    <th>{{ t("datasets.candidate") }}</th>
+                    <th>{{ t("datasets.operator") }}</th>
+                    <th>{{ t("datasets.patch") }}</th>
+                    <th>{{ t("experiments.action") }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="candidate in mutationDiscovery.candidates" :key="candidate.candidate_id">
+                    <td>
+                      <span class="mutation-status" :data-status="candidate.selection.status">{{ mutationStatusLabel(candidate) }}</span>
+                    </td>
+                    <td>
+                      <strong>{{ candidate.candidate_id }}</strong>
+                      <small class="block-mono">{{ candidate.matcher.source_path }}:{{ candidate.matcher.start_line }}</small>
+                    </td>
+                    <td>{{ candidate.operator }}</td>
+                    <td>
+                      <code>{{ candidate.patch.file }}</code>
+                      <pre>{{ candidate.patch.old }}
+=> {{ candidate.patch.new }}</pre>
+                    </td>
+                    <td>
+                      <button
+                        class="text-button"
+                        type="button"
+                        :disabled="candidate.selection.status !== 'selected'"
+                        @click="selectedCandidateId = candidate.candidate_id"
+                      >
+                        {{ selectedCandidateId === candidate.candidate_id ? t("datasets.selected") : t("datasets.select") }}
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-else-if="mutationDiscovery" class="mode-note compact-note">{{ t("datasets.noCandidates") }}</p>
+
+            <div v-if="selectedCandidate" class="confirm-grid">
+              <label>
+                <span>{{ t("datasets.seededBugId") }}</span>
+                <input v-model="confirmForm.seededBugId" type="text" placeholder="bug-auto-id" />
+              </label>
+              <label>
+                <span>{{ t("datasets.variantId") }}</span>
+                <input v-model="confirmForm.variantId" type="text" placeholder="variant-auto-id" />
+              </label>
+              <label>
+                <span>{{ t("datasets.variantName") }}</span>
+                <input v-model="confirmForm.variantName" type="text" />
+              </label>
+              <label>
+                <span>{{ t("projects.description") }}</span>
+                <input v-model="confirmForm.description" type="text" />
+              </label>
+              <label class="wide-field">
+                <span>{{ t("datasets.expectedDetection") }}</span>
+                <input v-model="confirmForm.expectedDetection" type="text" />
+              </label>
+              <label class="probe-field">
+                <span>{{ t("datasets.probeJson") }}</span>
+                <textarea v-model="confirmForm.probeJson" rows="7" spellcheck="false" />
+              </label>
+              <button class="text-button confirm-button" type="button" :disabled="!canConfirmMutation" @click="confirmMutationCandidate">
+                <CheckCircle2 :size="16" aria-hidden="true" />
+                {{ mutationConfirming ? t("datasets.confirming") : t("datasets.confirmSelected") }}
+              </button>
+            </div>
+          </article>
           <section class="bug-stack">
             <article v-for="bug in selectedTask.seeded_bugs" :key="bug.id" class="subtle-panel bug-card">
               <header class="bug-head">
@@ -393,6 +683,7 @@ watch(
 .task-list,
 .task-overview,
 .json-panel,
+.mutation-panel,
 .bug-card {
   padding: 18px;
 }
@@ -420,7 +711,10 @@ watch(
   text-transform: uppercase;
 }
 
-.dataset-form-grid input {
+.dataset-form-grid input,
+.confirm-grid input,
+.confirm-grid textarea,
+.mutation-controls input {
   width: 100%;
   min-height: 34px;
   padding: 6px 9px;
@@ -463,6 +757,7 @@ watch(
 .task-detail,
 .bug-stack,
 .json-panel,
+.mutation-panel,
 .bug-card {
   display: grid;
   gap: 14px;
@@ -535,6 +830,111 @@ watch(
   max-height: 180px;
 }
 
+
+.mutation-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.mutation-controls,
+.confirm-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.mutation-controls label,
+.confirm-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.mutation-controls label span,
+.confirm-grid label span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.confirm-grid textarea {
+  min-height: 148px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.probe-field {
+  grid-column: 1 / -1;
+}
+
+.confirm-button {
+  justify-self: start;
+}
+
+.compact-banner,
+.compact-note {
+  margin: 0;
+}
+
+.mutation-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mutation-summary span {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(251, 250, 247, 0.72);
+}
+
+.mutation-summary strong {
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.mutation-summary small,
+.mutation-status {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.mutation-status {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-soft);
+}
+
+.mutation-status[data-status="selected"] {
+  border-color: rgba(49, 95, 125, 0.28);
+  background: rgba(49, 95, 125, 0.08);
+  color: var(--tool);
+}
+
+.mutation-table code,
+.mutation-table pre {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.mutation-table pre {
+  max-width: 420px;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 1080px) {
   .hero-band,
   .metadata-grid,

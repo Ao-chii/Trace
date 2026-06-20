@@ -309,6 +309,147 @@ export interface EvalDatasetDetailOut extends EvalDatasetOut {
   tasks: EvalTaskDetailOut[];
 }
 
+export interface EvalTaskCreateRequest {
+  id?: string | null;
+  project_snapshot_id: string;
+  target_scope?: JsonObject;
+  goal: string;
+  expected_capabilities?: JsonValue[];
+}
+
+export interface SeededBugCreateRequest {
+  id?: string | null;
+  bug_type: string;
+  description: string;
+  expected_detection: string;
+}
+
+export interface CanonicalPatch {
+  file: string;
+  old: string;
+  new: string;
+}
+
+export interface BugVariantCreateRequest {
+  id?: string | null;
+  variant_name: string;
+  canonical_kind?: "patch";
+  patch: CanonicalPatch;
+  mutated_snapshot_id?: string | null;
+  ground_truth?: JsonObject;
+}
+
+export type MutationOperatorKind =
+  | "comparison_boundary"
+  | "comparison_negation"
+  | "boolean_negation"
+  | "arithmetic_operator"
+  | "constant_replacement"
+  | "return_value"
+  | "exception_type"
+  | "statement_deletion"
+  | "unknown";
+
+export type MutantSelectionStatus = "selected" | "not_selected" | "excluded";
+export type MutantSelectedBy = "auto_sampler" | "manual";
+
+export interface MutantMatcherContract {
+  matcher_kind: "source_location_hash" | "operator_signature";
+  source_path: string;
+  start_line: number;
+  end_line: number;
+  original_content_hash: string;
+  operator: MutationOperatorKind;
+  target_symbol: string | null;
+  context_hash: string | null;
+}
+
+export interface MutantSelectionContract {
+  status: MutantSelectionStatus;
+  selected_by: MutantSelectedBy;
+  reason: string;
+  sample_seed: number | null;
+  sample_index: number | null;
+}
+
+export interface MutationCandidateContract {
+  candidate_id: string;
+  eval_task_id: string;
+  source_snapshot_id: string;
+  operator: MutationOperatorKind;
+  patch: CanonicalPatch;
+  matcher: MutantMatcherContract;
+  selection: MutantSelectionContract;
+  probe: JsonObject;
+}
+
+export type MutationDiscoveryExclusionCode =
+  | "syntax_error"
+  | "target_not_found"
+  | "source_segment_unavailable"
+  | "unsupported_compare"
+  | "non_unique_patch";
+
+export interface MutationDiscoveryExclusionContract {
+  reason_code: MutationDiscoveryExclusionCode;
+  message: string;
+  target_ref: string | null;
+  source_path: string | null;
+  line: number | null;
+}
+
+export interface MutationDiscoveryResultContract {
+  eval_task_id: string;
+  source_snapshot_id: string;
+  sample_seed: number;
+  max_selected: number;
+  candidates: MutationCandidateContract[];
+  exclusions: MutationDiscoveryExclusionContract[];
+  selected_count: number;
+  excluded_count: number;
+}
+
+export interface MutationDiscoveryAuditReportContract {
+  schema_version: "v2.mutation_discovery_audit";
+  generated_at: string;
+  eval_task_id: string;
+  dataset_id: string;
+  source_snapshot_id: string;
+  target_scope: JsonObject | JsonValue[] | null;
+  sample_seed: number;
+  max_selected: number;
+  dry_run: true;
+  writes_database: false;
+  runs_replay: false;
+  selected_candidate_ids: string[];
+  exclusion_summary: Partial<Record<MutationDiscoveryExclusionCode, number>>;
+  discovery: MutationDiscoveryResultContract;
+}
+
+export interface MutationDiscoveryDryRunRequest {
+  sample_seed?: number;
+  max_selected?: number;
+  target_scope_override?: JsonObject | JsonValue[] | null;
+}
+
+export interface MutationProbeSpec {
+  target_kind: string;
+  probe: string;
+  clean_value: JsonValue;
+  buggy_value: JsonValue;
+}
+
+export interface MutationCandidateConfirmRequest {
+  audit_report: MutationDiscoveryAuditReportContract;
+  candidate_id: string;
+  probe: MutationProbeSpec;
+  seeded_bug_id?: string | null;
+  variant_id?: string | null;
+  bug_type?: "auto_mutation";
+  description?: string | null;
+  expected_detection?: string | null;
+  variant_name?: string | null;
+}
 export type ExperimentDataSourceKind = "mock" | "scripted" | "real_llm";
 export type ExperimentStatus = "draft" | "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ReplayStatus = "queued" | "running" | "completed" | "failed" | "cancelled";

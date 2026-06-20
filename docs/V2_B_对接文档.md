@@ -45,6 +45,8 @@ B 线已把 prompt-safe 事件类型策略抽到 `evaluation_event_policy.py`，
 
 Mutation confirmation 入口不再信任客户端回传的 audit candidate。confirm 时会按 audit report 的 `sample_seed`、`max_selected`、`target_scope` 在服务端重新 dry-run discovery，并要求候选内容与服务端当前 selected candidate 完全一致，避免伪造/过期 audit 把未选中 mutant 入库。该入口只允许创建 `bug_type=auto_mutation`，不允许客户端把 auto mutation 伪装成普通 seeded bug。普通 `create_bug_variant` 入口也拒绝 `ground_truth.source=auto_mutation`，防止绕过 probe confirmation 污染 sampled mutation score。
 
+Dataset UI 已接入后端已有 task / seeded bug / variant / mutation discovery API 合同。UI 目前只做最小链路：对选中 task 发起 mutation dry-run、展示 selected/excluded candidate、由用户选择 selected candidate 并提交 probe JSON 调用 `confirm-selected`。由于 dry-run API 返回 discovery 而不是完整 audit report，UI 会基于当前 task、dry-run 参数和 discovery 组装 `v2.mutation_discovery_audit`；这不是信任前端授权，服务端 confirm 仍会按 audit report 参数重新 discovery 并逐字段比对 candidate。UI 不提供绕过 confirmation 的 `auto_mutation` variant 自由创建入口。
+
 ## 4. 当前测试证据
 
 已验证：
