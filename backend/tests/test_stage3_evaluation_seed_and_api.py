@@ -116,6 +116,21 @@ def test_eval_dataset_task_bug_variant_api_enforces_patch_unique_hit(tmp_path, c
         )
         assert duplicate_bug_id.status_code == 409
 
+        bypass_auto_mutation_response = client.post(
+            f"/api/v1/seeded-bugs/{bug['id']}/variants",
+            json={
+                "id": "variant-auto-bypass",
+                "variant_name": "auto mutation bypass",
+                "patch": {
+                    "file": "shop/pricing.py",
+                    "old": "if weight_kg <= 5:",
+                    "new": "if weight_kg < 5:",
+                },
+                "ground_truth": {"source": "auto_mutation"},
+            },
+        )
+        assert bypass_auto_mutation_response.status_code == 400
+        assert "mutation confirmation" in bypass_auto_mutation_response.text
         variant_response = client.post(
             f"/api/v1/seeded-bugs/{bug['id']}/variants",
             json={
@@ -393,15 +408,20 @@ def test_confirm_selected_mutation_candidate_creates_seeded_bug_and_variant_only
             for candidate in dry_run["candidates"]
             if candidate["candidate_id"] == selected_candidate_id
         )
-        not_selected_candidate_id = next(
-            candidate["candidate_id"]
+        not_selected_candidate = next(
+            candidate
             for candidate in dry_run["candidates"]
             if candidate["selection"]["status"] != "selected"
         )
-        if selected_candidate["patch"]["old"] == "weight_kg <= 5":
-            probe = {"target_kind": "function", "probe": "shipping_fee(5)", "clean_value": 10, "buggy_value": 20}
-        else:
-            probe = {"target_kind": "function", "probe": "shipping_fee(10)", "clean_value": 30, "buggy_value": 20}
+        not_selected_candidate_id = not_selected_candidate["candidate_id"]
+
+        def probe_for(candidate: dict) -> dict:
+            if candidate["patch"]["old"] == "weight_kg <= 5":
+                return {"target_kind": "function", "probe": "shipping_fee(5)", "clean_value": 10, "buggy_value": 20}
+            return {"target_kind": "function", "probe": "shipping_fee(10)", "clean_value": 30, "buggy_value": 20}
+
+        probe = probe_for(selected_candidate)
+        not_selected_probe = probe_for(not_selected_candidate)
         with Session(get_engine()) as session:
             audit_report = build_task_mutation_discovery_audit_report(
                 session,
@@ -409,6 +429,44 @@ def test_confirm_selected_mutation_candidate_creates_seeded_bug_and_variant_only
                 sample_seed=13,
                 max_selected=1,
             )
+        tampered_audit = audit_report.model_dump(mode="json")
+        tampered_audit["selected_candidate_ids"] = [not_selected_candidate_id]
+        for candidate in tampered_audit["discovery"]["candidates"]:
+            if candidate["candidate_id"] == selected_candidate_id:
+                candidate["selection"] = {
+                    "status": "not_selected",
+                    "selected_by": "auto_sampler",
+                    "reason": "tampered out of selected set",
+                }
+            elif candidate["candidate_id"] == not_selected_candidate_id:
+                candidate["selection"] = {
+                    "status": "selected",
+                    "selected_by": "auto_sampler",
+                    "reason": "tampered into selected set",
+                    "sample_seed": 13,
+                    "sample_index": 0,
+                }
+        tampered_response = client.post(
+            f"/api/v1/eval-tasks/{task['id']}/mutation-discovery/confirm-selected",
+            json={
+                "audit_report": tampered_audit,
+                "candidate_id": not_selected_candidate_id,
+                "probe": not_selected_probe,
+                "seeded_bug_id": "bug-tampered-audit",
+                "variant_id": "variant-tampered-audit",
+            },
+        )
+        wrong_bug_type_response = client.post(
+            f"/api/v1/eval-tasks/{task['id']}/mutation-discovery/confirm-selected",
+            json={
+                "audit_report": audit_report.model_dump(mode="json"),
+                "candidate_id": selected_candidate_id,
+                "probe": probe,
+                "bug_type": "seeded_bug",
+                "seeded_bug_id": "bug-wrong-type",
+                "variant_id": "variant-wrong-type",
+            },
+        )
         bad_probe_response = client.post(
             f"/api/v1/eval-tasks/{task['id']}/mutation-discovery/confirm-selected",
             json={
@@ -450,6 +508,10 @@ def test_confirm_selected_mutation_candidate_creates_seeded_bug_and_variant_only
             },
         )
 
+    assert tampered_response.status_code == 400
+    assert "current server discovery" in tampered_response.text
+    assert wrong_bug_type_response.status_code == 400
+    assert "bug_type=auto_mutation" in wrong_bug_type_response.text
     assert bad_probe_response.status_code == 400
     assert "probe clean_value and buggy_value must differ" in bad_probe_response.text
     assert confirm_response.status_code == 200

@@ -10,6 +10,7 @@ from app.schemas.evaluation import (
     SourceContextSnippet,
 )
 from app.schemas.tools import FailureDetail
+from app.services.evaluation_event_policy import prompt_safe_event_type_reason
 from app.services.source_context_trace import (
     make_source_context_trace as _trace,
     safe_source_path as _safe_source_path,
@@ -141,7 +142,14 @@ def append_evaluation_event_context(
     risk_notes: list[str],
     retrieval_trace: list[SourceContextRetrievalTrace],
 ) -> int:
-    events = [EvaluationEventContract.model_validate(event) for event in evaluation_events]
+    events = []
+    for raw_event in evaluation_events:
+        event = EvaluationEventContract.model_validate(raw_event)
+        filter_reason = prompt_safe_event_type_reason(event)
+        if filter_reason is not None:
+            risk_notes.append(f"evaluation event filtered from prompt: {event.event_id} ({filter_reason})")
+            continue
+        events.append(event)
     source_path = _safe_source_path(f"{ctx.relpath(ctx.test_write_dir)}/evaluation_events.txt")
     if source_path is None:
         source_path = "tests/generated/evaluation_events.txt"

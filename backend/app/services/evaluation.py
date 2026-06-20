@@ -315,10 +315,20 @@ def confirm_selected_mutation_candidate(
         raise EvaluationError("audit report dataset_id does not match task")
     if audit_report.source_snapshot_id != snapshot.id:
         raise EvaluationError("audit report source_snapshot_id does not match task snapshot")
+    if bug_type != "auto_mutation":
+        raise EvaluationError("auto mutation confirmation requires bug_type=auto_mutation")
 
-    candidate = _selected_candidate_from_audit(audit_report, candidate_id)
-    if candidate.eval_task_id != task.id or candidate.source_snapshot_id != snapshot.id:
+    reported_candidate = _selected_candidate_from_audit(audit_report, candidate_id)
+    if reported_candidate.eval_task_id != task.id or reported_candidate.source_snapshot_id != snapshot.id:
         raise EvaluationError("mutation candidate does not match task or snapshot")
+    candidate = _selected_candidate_from_current_discovery(
+        session,
+        task,
+        audit_report=audit_report,
+        candidate_id=candidate_id,
+    )
+    if reported_candidate.model_dump(mode="json") != candidate.model_dump(mode="json"):
+        raise EvaluationError("audit report candidate does not match current server discovery")
 
     bug_id = seeded_bug_id or f"bug-{candidate.candidate_id}"
     var_id = variant_id or f"variant-{candidate.candidate_id}"
@@ -366,6 +376,7 @@ def confirm_selected_mutation_candidate(
         variant_name=variant_name or f"auto mutation {candidate.candidate_id}",
         patch=candidate.patch.model_dump(mode="json"),
         ground_truth=ground_truth,
+        allow_auto_mutation=True,
     )
     return SeededBugDetailOut.model_validate(bug).model_copy(
         update={"variants": [BugVariantOut.model_validate(variant)]}
@@ -384,6 +395,29 @@ def _selected_candidate_from_audit(
                 raise EvaluationError("candidate selection status is not selected")
             return candidate
     raise EvaluationError("candidate not found in audit report")
+
+
+def _selected_candidate_from_current_discovery(
+    session: Session,
+    task: EvalTask,
+    *,
+    audit_report: MutationDiscoveryAuditReportContract,
+    candidate_id: str,
+) -> MutationCandidateContract:
+    discovery = dry_run_task_mutation_discovery(
+        session,
+        task.id,
+        sample_seed=audit_report.sample_seed,
+        max_selected=audit_report.max_selected,
+        target_scope_override=audit_report.target_scope,
+    )
+    for candidate in discovery.candidates:
+        if candidate.candidate_id != candidate_id:
+            continue
+        if candidate.selection.status != "selected":
+            raise EvaluationError("audit report candidate is not selected by current server discovery")
+        return candidate
+    raise EvaluationError("audit report candidate is not present in current server discovery")
 
 
 def _check_auto_mutation_probe(
@@ -448,9 +482,12 @@ def create_bug_variant(
     mutated_snapshot_id: str | None = None,
     ground_truth: dict | None = None,
     variant_id: str | None = None,
+    allow_auto_mutation: bool = False,
 ) -> BugVariant:
     if canonical_kind != "patch":
         raise EvaluationError("V2.1 only supports canonical_kind=patch")
+    if (ground_truth or {}).get("source") == "auto_mutation" and not allow_auto_mutation:
+        raise EvaluationError("auto mutation variants must be created through mutation confirmation")
     if variant_id is not None and get_bug_variant(session, variant_id) is not None:
         raise EvaluationConflictError("bug variant id already exists")
     bug = get_seeded_bug_or_404(session, seeded_bug_id)

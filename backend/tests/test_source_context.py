@@ -66,6 +66,36 @@ def test_slices_target_function_not_whole_file(tmp_path):
     assert "def helper" in bundle.source_context_text
 
 
+def test_slices_module_constant_used_by_target_function(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "api.py").write_text(
+        "from fastapi import HTTPException\n"
+        "\n"
+        "_PRICES = {'book': 30.0, 'pen': 2.5}\n"
+        "UNUSED = {'apple': 99.0}\n"
+        "\n"
+        "\n"
+        "def get_price(item: str):\n"
+        "    if item not in _PRICES:\n"
+        "        raise HTTPException(status_code=404, detail='item not found')\n"
+        "    return {'item': item, 'total': _PRICES[item]}\n",
+        encoding="utf-8",
+    )
+    analysis = AnalyzeProjectOutput(
+        functions=[FunctionInfo(name="get_price", signature="get_price(item: str)", file="shop/api.py")]
+    )
+
+    bundle = build_source_context_bundle(_ctx(tmp_path), ["get_price"], analysis)
+
+    assert bundle.context_completeness.status == "complete"
+    assert [snippet.source_kind for snippet in bundle.snippets] == ["target_source", "dependency"]
+    dependency = bundle.snippets[1]
+    assert dependency.path == "shop/api.py"
+    assert dependency.symbol == "_PRICES"
+    assert dependency.target_ref == "dependency:_PRICES"
+    assert "_PRICES = {'book': 30.0, 'pen': 2.5}" in bundle.source_context_text
+    assert "UNUSED" not in bundle.source_context_text
+
 def test_slices_cross_file_direct_import_dependency(tmp_path):
     (tmp_path / "shop").mkdir()
     (tmp_path / "shop" / "helpers.py").write_text(
@@ -797,6 +827,34 @@ def test_source_context_includes_evaluation_event_failure_context(tmp_path):
     assert trace.target == "evt-flaky-1"
 
 
+def test_source_context_filters_audit_only_evaluation_events_from_prompt(tmp_path):
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "pricing.py").write_text(_SAMPLE, encoding="utf-8")
+    analysis = AnalyzeProjectOutput(
+        functions=[FunctionInfo(name="target_fn", signature="target_fn(a, b)", file="shop/pricing.py")]
+    )
+    event = EvaluationEventContract(
+        event_id="evt-provider-1",
+        event_type="provider_failure",
+        severity="blocking",
+        scope="experiment",
+        experiment_id="exp-1",
+        stable_code="provider_failure",
+        reason="LLM provider failed with private transport details",
+    )
+
+    bundle = build_source_context_bundle(
+        _ctx(tmp_path),
+        ["target_fn"],
+        analysis,
+        evaluation_events=[event],
+    )
+
+    assert "evt-provider-1" not in bundle.source_context_text
+    assert "provider_failure" not in bundle.source_context_text
+    assert not any(snippet.retrieval_source == "evaluation_event" for snippet in bundle.snippets)
+    assert any("event is audit-only" in note for note in bundle.context_completeness.risk_notes)
+
 def test_source_context_marks_evaluation_event_truncation_partial(tmp_path):
     (tmp_path / "shop").mkdir()
     (tmp_path / "shop" / "pricing.py").write_text(_SAMPLE, encoding="utf-8")
@@ -806,14 +864,14 @@ def test_source_context_marks_evaluation_event_truncation_partial(tmp_path):
     events = [
         EvaluationEventContract(
             event_id=f"evt-replay-{index}",
-            event_type="replay_uncaptured",
+            event_type="replay_failure",
             severity="info",
             scope="replay",
             experiment_id="exp-1",
             clean_run_id="clean-1",
             replay_id=f"replay-{index}",
             bug_variant_id=f"variant-{index}",
-            stable_code="replay_uncaptured",
+            stable_code="replay_failure",
             reason="variant replay did not capture bug",
         )
         for index in range(2)

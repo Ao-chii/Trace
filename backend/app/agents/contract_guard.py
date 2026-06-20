@@ -315,13 +315,14 @@ def _source_backed_oracle_violations(
     if not functions:
         return []
     exception_bases = _source_exception_bases(source_context)
+    source_env = _source_global_env(source_context, functions, exception_bases)
 
     violations: list[str] = []
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for base_env in _parametrize_envs(fn):
-            env = _eval_base_env(exception_bases)
+            env = dict(source_env)
             env.update(base_env)
             tainted_names: set[str] = set()
             for stmt in fn.body:
@@ -344,6 +345,7 @@ def _route_response_oracle_violations(tree: ast.AST, source_context: str) -> lis
         return []
     functions = _source_functions(source_context)
     exception_bases = _source_exception_bases(source_context)
+    source_env = _source_global_env(source_context, functions, exception_bases)
     routes = _route_handlers_from_source_context(source_context)
     if not functions or not routes:
         return []
@@ -356,7 +358,7 @@ def _route_response_oracle_violations(tree: ast.AST, source_context: str) -> lis
             continue
         for base_env in _parametrize_envs(fn):
             env = dict(base_env)
-            global_env = _eval_base_env(exception_bases)
+            global_env = dict(source_env)
             tainted_names: set[str] = set()
             for stmt in fn.body:
                 _remember_monkeypatch_global(stmt, functions, env, global_env)
@@ -894,6 +896,40 @@ def _expanded_exception_bases(name: str, direct: dict[str, set[str]]) -> set[str
 def _eval_base_env(exception_bases: dict[str, set[str]]) -> dict[str, Any]:
     return {_EXCEPTION_BASES_ENV_KEY: exception_bases} if exception_bases else {}
 
+
+def _source_global_env(
+    source_context: str,
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    exception_bases: dict[str, set[str]],
+) -> dict[str, Any]:
+    env = _eval_base_env(exception_bases)
+    chunks = re.findall(r"```(?:python)?\s*(.*?)```", source_context, flags=re.DOTALL)
+    if not chunks:
+        chunks = [source_context]
+    for chunk in chunks:
+        try:
+            tree = ast.parse(chunk)
+        except SyntaxError:
+            continue
+        for node in getattr(tree, "body", []):
+            targets: list[ast.expr] = []
+            value: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+                value = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+                value = node.value
+            if value is None:
+                continue
+            try:
+                evaluated = _eval_expr(value, functions, env)
+            except (_EvalUnknown, _EvalRaised):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    env[target.id] = evaluated
+    return env
 
 def _exception_bases_from_env(env: dict[str, Any]) -> dict[str, set[str]]:
     raw = env.get(_EXCEPTION_BASES_ENV_KEY)

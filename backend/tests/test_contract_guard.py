@@ -323,6 +323,84 @@ def get_price(item: str, member: bool = False):
 ```"""
 
 
+PRICE_ROUTE_WITH_CONSTANT_SOURCE_CONTEXT = """## shop/api.py:11-15 (get_price)
+```python
+@app.get("/price/{item}")
+def get_price(item: str, member: bool = False):
+    if item not in _PRICES:
+        raise HTTPException(status_code=404, detail="item not found")
+    return {"item": item, "total": apply_discount(_PRICES[item], member)}
+```
+
+## shop/api.py:8-8 (dependency:_PRICES)
+```python
+_PRICES = {"book": 30.0, "pen": 2.5}
+```
+
+## shop/pricing.py:5-9 (dependency:apply_discount)
+```python
+def apply_discount(total, is_member):
+    if is_member and total >= 100:
+        return round(total * 0.9, 2)
+    return round(total, 2)
+```"""
+
+
+def test_generation_contract_rejects_route_path_value_without_constant_evidence():
+    content = (
+        "from fastapi.testclient import TestClient\n"
+        "from shop.api import app\n\n"
+        "def test_get_price_apple():\n"
+        "    client = TestClient(app)\n"
+        "    response = client.get('/price/apple')\n"
+        "    assert response.status_code == 200\n"
+        "    assert response.json()['item'] == 'apple'\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_get_price_apple",
+                "target_route": "/price/{item}",
+                "assertion_summary": "验证 apple 商品价格",
+            }
+        ],
+        target_type="route",
+        target_ref="GET /price/{item}",
+        source_context=PRICE_ROUTE_WITH_CONSTANT_SOURCE_CONTEXT,
+    )
+
+    assert any("路由响应 oracle" in violation for violation in violations)
+
+
+def test_generation_contract_accepts_route_path_value_from_constant_evidence():
+    content = (
+        "from fastapi.testclient import TestClient\n"
+        "from shop.api import app\n\n"
+        "def test_get_price_book():\n"
+        "    client = TestClient(app)\n"
+        "    response = client.get('/price/book')\n"
+        "    assert response.status_code == 200\n"
+        "    assert response.json()['item'] == 'book'\n"
+        "    assert response.json()['total'] == 30.0\n"
+    )
+    violations = check_generation_contract(
+        content,
+        [
+            {
+                "test_name": "test_get_price_book",
+                "target_route": "/price/{item}",
+                "assertion_summary": "验证 book 商品价格",
+            }
+        ],
+        target_type="route",
+        target_ref="GET /price/{item}",
+        source_context=PRICE_ROUTE_WITH_CONSTANT_SOURCE_CONTEXT,
+    )
+
+    assert violations == []
+
+
 PRICE_ROUTE_RESPONSE_MODEL_SOURCE_CONTEXT = """## shop/api.py:1-18 (get_price)
 ```python
 from pydantic import BaseModel
