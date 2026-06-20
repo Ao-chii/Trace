@@ -41,6 +41,12 @@ from app.services.source_context_routes import (
     route_target_parts as _route_target_parts,
     route_with_method as _route_with_method,
 )
+from app.services.source_context_targets import (
+    ast_grep_query_for_target as _ast_grep_query_for_target,
+    lsp_query_for_target as _lsp_query_for_target,
+    rg_query_for_target as _rg_query_for_target,
+    symbol_query_for_target as _symbol_query_for_target,
+)
 from app.services.source_context_support import (
     dedupe_support_targets as _dedupe_support_targets,
     is_generated_test_path as _is_generated_test_path,
@@ -703,14 +709,6 @@ def _analysis_match(analysis: AnalyzeProjectOutput, target: str) -> _AnalysisMat
     return None
 
 
-def _ast_grep_query_for_target(value: str) -> tuple[str | None, str | None, str | None]:
-    method, route_path = _route_target_parts(value)
-    if route_path:
-        query = f"{method} {route_path}" if method else route_path
-        return query, "route", method
-    symbol = _symbol_query_for_target(value)
-    return (symbol, "function", None) if symbol else (None, None, None)
-
 
 def _rank_ast_grep_matches(ctx: ToolContext, matches: list[AstGrepMatch]) -> list[AstGrepMatch]:
     generated_tests_dir = ctx.relpath(ctx.test_write_dir)
@@ -771,42 +769,6 @@ def _ast_grep_candidate_trace(raw: str, match: AstGrepMatch, note: str) -> Sourc
         risk_notes=[note],
     )
 
-
-def _rg_query_for_target(value: str) -> str | None:
-    _method, route_path = _route_target_parts(value)
-    if route_path:
-        return route_path
-    symbol = _symbol_query_for_target(value)
-    return symbol or None
-
-
-def _lsp_query_for_target(value: str) -> str:
-    norm = value.strip()
-    if norm.startswith("route:"):
-        norm = norm.removeprefix("route:").strip()
-    if _looks_like_route_target(norm):
-        return ""
-    if "::" in norm and norm.split("::", 1)[0].endswith(".py"):
-        norm = norm.split("::", 1)[1]
-    elif ":" in norm and norm.split(":", 1)[0].endswith(".py"):
-        norm = norm.split(":", 1)[1]
-    parts = [part for part in norm.split(".") if part]
-    if len(parts) == 2 and parts[0][:1].isupper():
-        return norm
-    return parts[-1] if parts else ""
-
-
-def _symbol_query_for_target(value: str) -> str:
-    norm = value.strip()
-    if norm.startswith("route:"):
-        norm = norm.removeprefix("route:").strip()
-    if _looks_like_route_target(norm):
-        return ""
-    if "::" in norm and norm.split("::", 1)[0].endswith(".py"):
-        norm = norm.split("::", 1)[1]
-    elif ":" in norm and norm.split(":", 1)[0].endswith(".py"):
-        norm = norm.split(":", 1)[1]
-    return norm.rsplit(".", 1)[-1].strip()
 
 
 def _rank_rg_matches(ctx: ToolContext, matches: list[RgSearchMatch]) -> list[RgSearchMatch]:
