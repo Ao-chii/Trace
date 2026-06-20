@@ -26,6 +26,8 @@ A 线负责执行平台和评测尺子：executor、runtime profile、setup/repl
 
 本轮继续将 support target 收集、去重和 incomplete 判断机械拆到 source_context_support.py；不改变 prompt 内容、snippet 预算、retrieval trace 字段或 completeness 语义。
 
+随后将 route target 字符串解析 helper 机械拆到 source_context_routes.py；不改变 route handler 定位、fallback 顺序或 source context 输出。
+
 ## 3. A/B 接口约定
 
 A 线可继续把 source context completeness 作为 clean run gate 使用：

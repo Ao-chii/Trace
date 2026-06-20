@@ -34,6 +34,12 @@ from app.services.source_context_trace import (
     safe_source_path as _safe_source_path,
     source_context_trace_id as _trace_id,
 )
+from app.services.source_context_routes import (
+    looks_like_route_target as _looks_like_route_target,
+    route_path_without_method as _route_path_without_method,
+    route_target_parts as _route_target_parts,
+    route_with_method as _route_with_method,
+)
 from app.services.source_context_support import (
     dedupe_support_targets as _dedupe_support_targets,
     is_generated_test_path as _is_generated_test_path,
@@ -841,22 +847,6 @@ def _rg_candidate_trace(raw: str, match: RgSearchMatch, note: str) -> SourceCont
     )
 
 
-def _looks_like_route_target(value: str) -> bool:
-    _method, route_path = _route_target_parts(value)
-    return route_path is not None
-
-
-def _route_target_parts(value: str) -> tuple[str | None, str | None]:
-    norm = value.strip()
-    if norm.startswith("route:"):
-        norm = norm.removeprefix("route:").strip()
-    parts = norm.split(maxsplit=1)
-    if len(parts) == 2 and parts[0].upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}:
-        path = parts[1].strip()
-        return (parts[0].upper(), path) if path.startswith("/") else (None, None)
-    return (None, norm) if norm.startswith("/") else (None, None)
-
-
 def _route_handler_for_path(content: str, method: str | None, path: str) -> str | None:
     try:
         tree = ast.parse(content)
@@ -890,23 +880,6 @@ def _route_decorator_parts(decorator: ast.AST) -> tuple[str, str] | None:
     if not isinstance(first_arg, ast.Constant) or not isinstance(first_arg.value, str):
         return None
     return method, first_arg.value
-
-
-def _route_path_without_method(value: str) -> str:
-    norm = value.strip()
-    if norm.startswith("route:"):
-        norm = norm.removeprefix("route:").strip()
-    parts = norm.split(maxsplit=1)
-    if len(parts) == 2 and parts[0].upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}:
-        return parts[1].strip()
-    return norm
-
-
-def _route_with_method(value: str) -> str:
-    norm = value.strip()
-    if norm.startswith("route:"):
-        norm = norm.removeprefix("route:").strip()
-    return norm
 
 
 def _slice_symbol(content: str, symbol: str) -> tuple[int, int, str] | None:
