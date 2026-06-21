@@ -114,6 +114,8 @@ const variantCount = computed<number>(() => {
     : 0;
 });
 
+const availableSnapshotIds = computed(() => dataset.value?.project_snapshot_ids.map((item) => String(item)) ?? []);
+
 type ReadinessStatus = "ready" | "incomplete";
 type TaskReadinessFilter = "all" | ReadinessStatus;
 
@@ -419,6 +421,58 @@ function buildExclusionSummary(discovery: MutationDiscoveryResultContract): Part
   }, {});
 }
 
+function slugForResourceId(value: string, fallback: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 42);
+  return slug || fallback;
+}
+
+function probePresetForCandidate(candidate: MutationCandidateContract): MutationProbeSpec {
+  const rawProbe = candidate.probe as Partial<MutationProbeSpec>;
+  if (
+    typeof rawProbe.target_kind === "string" &&
+    typeof rawProbe.probe === "string" &&
+    rawProbe.target_kind.trim() &&
+    rawProbe.probe.trim() &&
+    "clean_value" in rawProbe &&
+    "buggy_value" in rawProbe
+  ) {
+    return {
+      target_kind: rawProbe.target_kind,
+      probe: rawProbe.probe,
+      clean_value: rawProbe.clean_value as JsonValue,
+      buggy_value: rawProbe.buggy_value as JsonValue
+    };
+  }
+  const target = candidate.matcher.target_symbol ?? candidate.matcher.source_path;
+  return {
+    target_kind: candidate.matcher.target_symbol ? "function" : "module",
+    probe: candidate.matcher.target_symbol ? target + "(...)" : target + ": " + candidate.patch.old + " -> " + candidate.patch.new,
+    clean_value: null,
+    buggy_value: null
+  };
+}
+
+function fillMutationConfirmPreset(candidate: MutationCandidateContract) {
+  const slug = slugForResourceId(candidate.matcher.target_symbol ?? candidate.operator, candidate.operator);
+  confirmForm.value.seededBugId = `bug-auto-${slug}`.slice(0, 64);
+  confirmForm.value.variantId = `variant-auto-${slug}`.slice(0, 64);
+  confirmForm.value.variantName = `${candidate.operator} mutation`;
+  confirmForm.value.description = `Auto mutation candidate ${candidate.operator} in ${candidate.matcher.source_path}`;
+  confirmForm.value.expectedDetection = "A generated test should pass on clean replay and fail on this confirmed mutated behavior.";
+  confirmForm.value.probeJson = JSON.stringify(probePresetForCandidate(candidate), null, 2);
+}
+
+function selectMutationCandidate(candidate: MutationCandidateContract) {
+  selectedCandidateId.value = candidate.candidate_id;
+  if (candidate.selection.status === "selected") {
+    fillMutationConfirmPreset(candidate);
+  }
+}
+
 function buildAuditReport(task: EvalTaskDetailOut, discovery: MutationDiscoveryResultContract): MutationDiscoveryAuditReportContract {
   return {
     schema_version: "v2.mutation_discovery_audit",
@@ -545,6 +599,47 @@ function commaList(value: string): string[] {
 
 function formatJsonInput(value: JsonObject): string {
   return JSON.stringify(value, null, 2);
+}
+
+const demoTargetScopePreset: JsonObject = {
+  files: ["checkout/pricing.py", "checkout/status.py"],
+  symbols: ["checkout.pricing.calculate_total", "checkout.status.resolve_status"]
+};
+
+const ordinaryGroundTruthPreset: JsonObject = {
+  source: "seeded_bug",
+  target: "checkout.pricing.calculate_total",
+  expected_behavior: "clean tests pass; the same frozen tests fail on the patched variant",
+  capture_signal: "assertion failure on buggy snapshot, not import/setup/runtime failure"
+};
+
+function firstSnapshotId(): string {
+  return availableSnapshotIds.value[0] ?? "";
+}
+
+function fillTaskDemoPreset() {
+  if (!editingTaskId.value && !taskForm.value.projectSnapshotId) {
+    taskForm.value.projectSnapshotId = firstSnapshotId();
+  }
+  taskForm.value.goal = "Generate pytest cases that catch pricing/status regressions while staying clean on the base snapshot.";
+  taskForm.value.expectedCapabilities = "boundary assertions, status-code assertions, frozen replay compatibility";
+  taskForm.value.targetScopeJson = formatJsonInput(demoTargetScopePreset);
+}
+
+function fillOrdinaryVariantPreset() {
+  const firstBug = selectedTask.value?.seeded_bugs[0];
+  if (!editingVariantId.value && !variantForm.value.seededBugId) {
+    variantForm.value.seededBugId = firstBug?.id ?? "";
+  }
+  if (!variantForm.value.variantName) {
+    variantForm.value.variantName = "free shipping threshold off by one";
+  }
+  if (!editingVariantId.value) {
+    variantForm.value.patchFile = variantForm.value.patchFile || "checkout/pricing.py";
+    variantForm.value.patchOld = variantForm.value.patchOld || "subtotal >= 100";
+    variantForm.value.patchNew = variantForm.value.patchNew || "subtotal > 100";
+  }
+  variantForm.value.groundTruthJson = formatJsonInput(ordinaryGroundTruthPreset);
 }
 
 function resetTaskForm() {
@@ -973,7 +1068,11 @@ watch(
             </label>
             <label>
               <span>{{ t("datasets.snapshot") }}</span>
-              <input v-model="taskForm.projectSnapshotId" type="text" placeholder="snapshot id" required :disabled="Boolean(editingTaskId)" />
+              <select v-if="availableSnapshotIds.length" v-model="taskForm.projectSnapshotId" required :disabled="Boolean(editingTaskId)">
+                <option value="">{{ t("common.none") }}</option>
+                <option v-for="snapshotId in availableSnapshotIds" :key="snapshotId" :value="snapshotId">{{ snapshotId }}</option>
+              </select>
+              <input v-else v-model="taskForm.projectSnapshotId" type="text" placeholder="snapshot id" required :disabled="Boolean(editingTaskId)" />
             </label>
             <label>
               <span>{{ t("projects.goal") }}</span>
@@ -988,6 +1087,9 @@ watch(
               <textarea v-model="taskForm.targetScopeJson" rows="5" spellcheck="false" />
             </label>
             <div class="form-actions">
+              <button class="text-button" type="button" :disabled="creating" @click="fillTaskDemoPreset">
+                {{ t("datasets.fillDemoTaskPreset") }}
+              </button>
               <button class="text-button" type="submit" :disabled="creating">
                 {{ editingTaskId ? t("datasets.updateTask") : t("datasets.createTask") }}
               </button>
@@ -1069,6 +1171,9 @@ watch(
               <textarea v-model="variantForm.groundTruthJson" rows="4" spellcheck="false" />
             </label>
             <div class="form-actions">
+              <button class="text-button" type="button" :disabled="creating" @click="fillOrdinaryVariantPreset">
+                {{ t("datasets.fillGroundTruthPreset") }}
+              </button>
               <button class="text-button" type="submit" :disabled="creating || (!editingVariantId && !variantForm.seededBugId.trim())">
                 {{ editingVariantId ? t("datasets.updateVariant") : t("datasets.createVariant") }}
               </button>
@@ -1229,7 +1334,7 @@ watch(
                         class="text-button"
                         type="button"
                         :disabled="candidate.selection.status !== 'selected'"
-                        @click="selectedCandidateId = candidate.candidate_id"
+                        @click="selectMutationCandidate(candidate)"
                       >
                         {{ selectedCandidateId === candidate.candidate_id ? t("datasets.selected") : t("datasets.select") }}
                       </button>
@@ -1288,6 +1393,7 @@ watch(
               <label class="probe-field">
                 <span>{{ t("datasets.probeJson") }}</span>
                 <textarea v-model="confirmForm.probeJson" rows="7" spellcheck="false" />
+                <small>{{ t("datasets.fillProbePresetHint") }}</small>
               </label>
               <button class="text-button confirm-button" type="button" :disabled="!canConfirmMutation" @click="confirmMutationCandidate">
                 <CheckCircle2 :size="16" aria-hidden="true" />
