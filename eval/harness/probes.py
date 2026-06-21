@@ -141,7 +141,15 @@ def check_variant_probe(
         "buggy_value": probe_meta.get("buggy_value"),
         "patch_file": patch.get("file"),
     }
-    missing = [key for key, value in required.items() if value is None]
+    missing = []
+    for key in ("target_kind", "probe"):
+        if required[key] is None:
+            missing.append(key)
+    for key in ("clean_value", "buggy_value"):
+        if key not in probe_meta:
+            missing.append(key)
+    if required["patch_file"] is None:
+        missing.append("patch_file")
     if missing:
         raise ProbeCheckError(f"bug variant {variant_id} probe metadata is incomplete: {', '.join(missing)}")
     if required["clean_value"] == required["buggy_value"]:

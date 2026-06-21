@@ -156,6 +156,38 @@ def test_mutation_discovery_dry_run_finds_boolean_constant_replacement_candidate
     assert all(candidate.matcher.operator == candidate.operator for candidate in result.candidates)
     assert all(candidate.selection.status == "selected" for candidate in result.candidates)
 
+
+def test_mutation_discovery_dry_run_finds_none_return_value_candidates(tmp_path):
+    project = tmp_path / "proj"
+    package = project / "shop"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "lookup.py").write_text(
+        "def find_user(user_id):\n"
+        "    return None\n\n"
+        "def is_available():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+
+    result = discover_mutation_candidates(
+        root=project,
+        eval_task_id="task-lookup",
+        source_snapshot_id="snap-clean",
+        target_scope={"targets": ["find_user", "is_available"]},
+        sample_seed=8,
+        max_selected=10,
+    )
+
+    assert result.selected_count == 2
+    assert result.excluded_count == 0
+    by_operator = {candidate.operator: candidate for candidate in result.candidates}
+    assert by_operator["return_value"].patch.old == "return None"
+    assert by_operator["return_value"].patch.new == "return False"
+    assert by_operator["return_value"].matcher.target_symbol == "find_user"
+    assert by_operator["constant_replacement"].patch.old == "return True"
+    assert all(candidate.selection.status == "selected" for candidate in result.candidates)
+
 def test_mutation_discovery_dry_run_reports_exclusions_without_writing_variants(tmp_path):
     project = tmp_path / "proj"
     package = project / "shop"

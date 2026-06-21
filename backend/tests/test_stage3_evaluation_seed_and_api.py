@@ -1138,6 +1138,92 @@ def test_confirm_selected_constant_replacement_mutation_candidate(tmp_path, clea
         assert session.scalar(select(func.count()).select_from(SeededBug)) == 1
         assert session.scalar(select(func.count()).select_from(BugVariant)) == 1
 
+
+def test_confirm_selected_return_value_mutation_candidate(tmp_path, clean_db):
+    app = create_app()
+    project_root = tmp_path / "proj"
+    package = project_root / "shop"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "lookup.py").write_text(
+        "def find_user(user_id):\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(app) as client:
+        snapshot = _create_project_and_snapshot(client, project_root)
+        dataset = client.post(
+            "/api/v1/eval-datasets",
+            json={
+                "id": "dataset-mutation-return-confirm",
+                "name": "mutation return value confirm",
+                "version": "v1",
+                "project_snapshot_ids": [snapshot["id"]],
+            },
+        ).json()
+        task = client.post(
+            f"/api/v1/eval-datasets/{dataset['id']}/tasks",
+            json={
+                "id": "task-mutation-return-confirm",
+                "project_snapshot_id": snapshot["id"],
+                "target_scope": {"targets": ["find_user"]},
+                "goal": "confirm return value mutants",
+            },
+        ).json()
+
+        dry_run = client.post(
+            f"/api/v1/eval-tasks/{task['id']}/mutation-discovery/dry-run",
+            json={"sample_seed": 8, "max_selected": 10},
+        ).json()
+        [candidate] = dry_run["candidates"]
+        assert candidate["operator"] == "return_value"
+        assert candidate["patch"] == {"file": "shop/lookup.py", "old": "return None", "new": "return False"}
+        assert candidate["selection"]["status"] == "selected"
+        assert candidate["selection"]["reason"]
+
+        with Session(get_engine()) as session:
+            audit_report = build_task_mutation_discovery_audit_report(
+                session,
+                task["id"],
+                sample_seed=8,
+                max_selected=10,
+            )
+
+        response = client.post(
+            f"/api/v1/eval-tasks/{task['id']}/mutation-discovery/confirm-selected",
+            json={
+                "audit_report": audit_report.model_dump(mode="json"),
+                "candidate_id": candidate["candidate_id"],
+                "probe": {
+                    "target_kind": "function",
+                    "probe": "find_user(1)",
+                    "clean_value": None,
+                    "buggy_value": False,
+                },
+                "seeded_bug_id": "bug-return-confirmed",
+                "variant_id": "variant-return-confirmed",
+                "description": "confirmed None return value mutation",
+                "expected_detection": "tests should catch None return value replacement",
+                "variant_name": "confirmed None return value mutation",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    confirmed = response.json()
+    assert confirmed["bug_type"] == "auto_mutation"
+    [variant] = confirmed["variants"]
+    assert variant["id"] == "variant-return-confirmed"
+    assert variant["ground_truth"]["source"] == "auto_mutation"
+    assert variant["ground_truth"]["mutation"]["operator"] == "return_value"
+    assert variant["ground_truth"]["mutation"]["selection"]["status"] == "selected"
+    assert variant["ground_truth"]["probe"]["probe_check"]["status"] == "passed"
+    assert variant["ground_truth"]["patch_unique_hit"]["hit_count"] == 1
+
+    with Session(get_engine()) as session:
+        assert session.scalar(select(func.count()).select_from(SeededBug)) == 1
+        assert session.scalar(select(func.count()).select_from(BugVariant)) == 1
+
 def test_seed_demo_dataset_is_repeatable_and_keeps_patch_metadata(clean_db):
     with Session(get_engine()) as session:
         first = seed_demo_dataset(session)

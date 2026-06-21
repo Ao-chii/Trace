@@ -95,6 +95,37 @@ def test_probe_check_accepts_structured_probe_metadata(tmp_path):
     assert result["buggy_actual"] == bug.buggy_value
 
 
+def test_probe_check_accepts_none_expected_value(tmp_path):
+    clean_root = tmp_path / "clean"
+    variant_root = tmp_path / "variant"
+    for root, return_value in ((clean_root, "None"), (variant_root, "False")):
+        package = root / "shop"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "lookup.py").write_text(
+            "def find_user(user_id):\n"
+            f"    return {return_value}\n",
+            encoding="utf-8",
+        )
+
+    result = check_variant_probe(
+        clean_root=clean_root,
+        variant_root=variant_root,
+        ground_truth={
+            "target_kind": "function",
+            "probe": "find_user(1)",
+            "clean_value": None,
+            "buggy_value": False,
+            "patch_artifact": {"patch": {"file": "shop/lookup.py"}},
+        },
+        variant_id="variant-none-return",
+    )
+
+    assert result is not None
+    assert result["status"] == "passed"
+    assert result["clean_actual"] is None
+    assert result["buggy_actual"] is False
+
 def test_probe_check_rejects_non_literal_function_probe(tmp_path):
     bug = BUGS[0]
     variant_root = dataset.materialize_variant(bug, tmp_path / "variant")
