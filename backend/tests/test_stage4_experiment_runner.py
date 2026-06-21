@@ -102,6 +102,64 @@ def _mark_wrong_status_as_confirmed_auto_mutation() -> None:
         session.commit()
 
 
+def _mark_variant_as_auto_mutation_probe_status(
+    session: Session,
+    variant_id: str,
+    *,
+    probe_status: str | None,
+) -> None:
+    bug_id = variant_id.removeprefix("variant-")
+    bug = next(item for item in BUGS if item.id == bug_id)
+    variant = session.get(BugVariant, variant_id)
+    assert variant is not None
+    ground_truth = dict(variant.ground_truth or {})
+    ground_truth["source"] = "auto_mutation"
+    ground_truth["mutation"] = {
+        "candidate_id": f"mut-demo-{bug.id}",
+        "eval_task_id": "task-demo-shop-pricing-v2",
+        "source_snapshot_id": DEMO_SNAPSHOT_ID,
+        "operator": "unknown",
+        "patch": {"file": bug.file, "old": bug.old, "new": bug.new},
+        "matcher": {
+            "matcher_kind": "operator_signature",
+            "source_path": bug.file,
+            "start_line": 1,
+            "end_line": 1,
+            "original_content_hash": f"sha256-demo-{bug.id}",
+            "operator": "unknown",
+            "target_symbol": bug.target,
+        },
+        "selection": {
+            "status": "selected",
+            "selected_by": "auto_sampler",
+            "reason": "sampled mutation denominator fixture",
+            "sample_seed": 7,
+            "sample_index": 0,
+        },
+        "probe": {},
+    }
+    probe = {
+        "target_kind": bug.kind,
+        "probe": bug.probe,
+        "clean_value": bug.clean_value,
+        "buggy_value": bug.buggy_value,
+    }
+    if probe_status is not None:
+        probe["probe_check"] = {
+            "status": probe_status,
+            "target_kind": bug.kind,
+            "probe": bug.probe,
+            "clean_expected": bug.clean_value,
+            "clean_actual": bug.clean_value,
+            "buggy_expected": bug.buggy_value,
+            "buggy_actual": bug.buggy_value if probe_status == "passed" else bug.clean_value,
+            "reason": "denominator fixture failed probe" if probe_status != "passed" else "",
+        }
+    ground_truth["probe"] = probe
+    variant.ground_truth = ground_truth
+    session.add(variant)
+
+
 def _run_celery_eager(monkeypatch) -> None:
     monkeypatch.setattr(celery_app.conf, "task_always_eager", True)
     monkeypatch.setattr(celery_app.conf, "task_eager_propagates", True)
@@ -318,6 +376,55 @@ def test_experiment_runner_creates_clean_runs_replays_and_db_metrics(monkeypatch
             assert row["captured_per_repeat"] == [per_repeat[index] for index in sorted(per_repeat)]
         assert audited_matrix == metrics["capture_matrix"]
 
+
+def test_sampled_mutation_score_denominator_requires_confirmed_probe_passed(clean_db):
+    _seed_v2_demo()
+
+    with Session(get_engine()) as session:
+        _mark_variant_as_auto_mutation_probe_status(
+            session,
+            "variant-wrong-status",
+            probe_status="passed",
+        )
+        _mark_variant_as_auto_mutation_probe_status(
+            session,
+            "variant-cmp-flip-discount",
+            probe_status="failed",
+        )
+        _mark_variant_as_auto_mutation_probe_status(
+            session,
+            "variant-boundary-shipping",
+            probe_status=None,
+        )
+        session.commit()
+
+        import app.services.experiments as experiment_module
+
+        experiment_module.create_experiment(
+            session,
+            experiment_id="exp-sampled-denominator",
+            name="sampled denominator",
+            dataset_id=DEMO_DATASET_ID,
+            strategy_version_ids=["sv-direct-v1"],
+            repeat_count=1,
+            llm_override={"provider": "mock", "model": "mock-1"},
+        )
+        metrics = get_experiment_metrics(session, "exp-sampled-denominator")
+
+    sampled = metrics["sampled_mutation_score"]
+    assert sampled["status"] == "incomplete_replay"
+    assert sampled["denominator_source"] == (
+        "bug_variants.ground_truth.source=auto_mutation + "
+        "ground_truth.probe.probe_check.status=passed"
+    )
+    assert sampled["mutant_count"] == 1
+    assert sampled["included_variant_ids"] == ["variant-wrong-status"]
+    assert sampled["excluded_variant_counts"] == {
+        "non_auto_mutation": 3,
+        "probe_check_not_passed": 2,
+    }
+    assert "variant-cmp-flip-discount" not in sampled["included_variant_ids"]
+    assert "variant-boundary-shipping" not in sampled["included_variant_ids"]
 
 def test_experiment_fails_if_generated_test_set_artifact_hash_changes(monkeypatch, clean_db):
     _seed_v2_demo()
